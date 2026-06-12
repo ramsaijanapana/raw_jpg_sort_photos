@@ -1,5 +1,5 @@
 name: photo_sorter
-description: "A new Flutter project."
+description: 'Sort RAW+JPG photos into tidy folders and cull shoots fast — one codebase for iOS, Android, macOS, Windows, and Linux.'
 publish_to: 'none'
 
 version: 1.0.0+1
@@ -17,12 +17,24 @@ dependencies:
   shared_preferences: ^2.5.5
   path: ^1.9.1
   window_manager: ^0.5.1
+  desktop_drop: ^0.7.1
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
   fake_async: ^1.3.1
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+  android: true
+  ios: true
+  windows:
+    generate: true
+    icon_size: 256
+  macos:
+    generate: true
 
 flutter:
   uses-material-design: true

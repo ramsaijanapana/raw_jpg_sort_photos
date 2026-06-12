@@ -1,5 +1,8 @@
+import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -73,10 +76,20 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   // Key to reach _StageState for zoom toggle from keyboard
   final _stageKey = GlobalKey<_StageState>();
 
+  bool _showExif = true;
+
   @override
   void initState() {
     super.initState();
     _claimFocusIfActive();
+    // Load persisted showExif preference.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      try {
+        final prefs = ref.read(prefsServiceProvider);
+        setState(() => _showExif = prefs.showExif);
+      } catch (_) {}
+    });
   }
 
   @override
@@ -119,6 +132,14 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
       context: context,
       builder: (_) => const _ShortcutsDialog(),
     );
+  }
+
+  void _toggleExif() {
+    final newVal = !_showExif;
+    setState(() => _showExif = newVal);
+    try {
+      ref.read(prefsServiceProvider).setShowExif(newVal);
+    } catch (_) {}
   }
 
   @override
@@ -188,6 +209,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
           onLast: () => ctrl.goto(state.pairs.length - 1),
           onUndo: ctrl.undo,
           onToggleZoom: () => _stageKey.currentState?.toggleZoom(null),
+          onToggleExif: _toggleExif,
           onShowShortcuts: () => _showShortcutsDialog(context),
           child: Column(
             children: [
@@ -206,6 +228,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
                   isWide: isWide,
                   ctrl: ctrl,
                   onOpenFolder: doOpenFolder,
+                  showExif: _showExif,
                 ),
               ),
 
@@ -249,6 +272,7 @@ class _ShortcutsDialog extends StatelessWidget {
       ('Z / Ctrl+Z', 'Undo'),
       ('R', 'JPG ⇄ RAW'),
       ('Space', 'Zoom 100%'),
+      ('I', 'Toggle EXIF overlay'),
       ('Home / End', 'First / Last'),
       ('? (Shift+/)', 'Show this help'),
     ];
@@ -306,6 +330,7 @@ class _KeyboardHandler extends StatelessWidget {
     required this.onLast,
     required this.onUndo,
     required this.onToggleZoom,
+    required this.onToggleExif,
     required this.onShowShortcuts,
   });
 
@@ -320,6 +345,7 @@ class _KeyboardHandler extends StatelessWidget {
   final VoidCallback onLast;
   final VoidCallback onUndo;
   final VoidCallback onToggleZoom;
+  final VoidCallback onToggleExif;
   final VoidCallback onShowShortcuts;
 
   @override
@@ -345,6 +371,8 @@ class _KeyboardHandler extends StatelessWidget {
         const SingleActivator(LogicalKeyboardKey.keyZ, meta: true): onUndo,
         // Space: toggle zoom
         const SingleActivator(LogicalKeyboardKey.space): onToggleZoom,
+        // I: toggle EXIF overlay
+        const SingleActivator(LogicalKeyboardKey.keyI): onToggleExif,
         // Shift+/ (?) — show shortcuts
         const SingleActivator(LogicalKeyboardKey.slash, shift: true):
             onShowShortcuts,
@@ -562,12 +590,14 @@ class _Stage extends ConsumerStatefulWidget {
     required this.isWide,
     required this.ctrl,
     required this.onOpenFolder,
+    this.showExif = true,
   });
 
   final CullState state;
   final bool isWide;
   final CullController ctrl;
   final VoidCallback onOpenFolder;
+  final bool showExif;
 
   @override
   ConsumerState<_Stage> createState() => _StageState();
@@ -589,6 +619,20 @@ class _StageState extends ConsumerState<_Stage>
   /// horizontal-swipe navigation gesture be active (otherwise pan-while-zoomed
   /// would be hijacked as a swipe).
   bool _atRest = true;
+
+  bool _dropHovering = false;
+
+  bool get _isDesktop =>
+      !kIsWeb && (Platform.isLinux || Platform.isMacOS || Platform.isWindows);
+
+  void _handleStageDrop(DropDoneDetails details) {
+    final files = details.files;
+    if (files.isEmpty) return;
+    final first = files.first.path;
+    final dir = Directory(first);
+    final folderPath = dir.existsSync() ? first : p.dirname(first);
+    ref.read(cullControllerProvider.notifier).openFolder(folderPath);
+  }
 
   @override
   void initState() {
@@ -738,6 +782,7 @@ class _StageState extends ConsumerState<_Stage>
                   onDoubleTap: () => toggleZoom(_doubleTapLocalPos),
                   onImageResolved: _resolveImageSize,
                   onOpenFolder: widget.onOpenFolder,
+                  showExif: widget.showExif,
                 ),
 
                 // Left flag stripe
@@ -806,6 +851,10 @@ class _StageState extends ConsumerState<_Stage>
                       ],
                     ),
                   ),
+
+                // EXIF overlay pill (bottom-left)
+                if (pair != null && widget.showExif)
+                  _ExifOverlay(stem: pair.stem),
               ],
             ),
           ),
@@ -813,8 +862,9 @@ class _StageState extends ConsumerState<_Stage>
       },
     );
 
+    Widget content;
     if (isWide) {
-      return Row(
+      content = Row(
         children: [
           // Left chevron
           Padding(
@@ -853,15 +903,67 @@ class _StageState extends ConsumerState<_Stage>
           ),
         ],
       );
+    } else {
+      content = Container(
+        margin: const EdgeInsets.all(8),
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: stageWidget,
+      );
     }
 
-    return Container(
-      margin: const EdgeInsets.all(8),
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: stageWidget,
+    if (!_isDesktop) return content;
+
+    return Stack(
+      children: [
+        DropTarget(
+          onDragEntered: (_) => setState(() => _dropHovering = true),
+          onDragExited: (_) => setState(() => _dropHovering = false),
+          onDragDone: (details) {
+            setState(() => _dropHovering = false);
+            _handleStageDrop(details);
+          },
+          child: content,
+        ),
+        if (_dropHovering)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Container(
+                margin: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.primary,
+                    width: 2,
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                  color: Theme.of(context)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.08),
+                ),
+                child: Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.55),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Text(
+                      'Drop folder to review',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
@@ -879,6 +981,7 @@ class _StageContent extends ConsumerStatefulWidget {
     required this.onDoubleTap,
     required this.onImageResolved,
     required this.onOpenFolder,
+    this.showExif = true,
   });
 
   final CullState state;
@@ -892,6 +995,7 @@ class _StageContent extends ConsumerStatefulWidget {
   final VoidCallback onDoubleTap;
   final void Function(ImageProvider) onImageResolved;
   final VoidCallback onOpenFolder;
+  final bool showExif;
 
   @override
   ConsumerState<_StageContent> createState() => _StageContentState();
@@ -1001,6 +1105,42 @@ class _StageContentState extends ConsumerState<_StageContent> {
   }
 }
 
+class _ExifOverlay extends ConsumerWidget {
+  const _ExifOverlay({required this.stem});
+  final String stem;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final exifAsync = ref.watch(exifProvider(stem));
+    return exifAsync.when(
+      loading: () => const SizedBox.shrink(),
+      error: (err, st) => const SizedBox.shrink(),
+      data: (summary) {
+        if (summary == null || summary.line.isEmpty) {
+          return const SizedBox.shrink();
+        }
+        return Positioned(
+          left: 12,
+          bottom: 12,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.55),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              summary.line,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Colors.white,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 class _FlagBadge extends StatelessWidget {
   const _FlagBadge({required this.flag});
 
@@ -1056,31 +1196,49 @@ class _Filmstrip extends ConsumerWidget {
         scrollDirection: Axis.horizontal,
         itemCount: state.pairs.length,
         itemExtent: itemExtent,
+        // ignore: deprecated_member_use
+        cacheExtent: 600,
         itemBuilder: (context, i) {
           final pair = state.pairs[i];
           final flag = state.flags[pair.stem] ?? CullFlag.undecided;
           final isCurrent = i == state.index;
 
-          final thumbAsync = ref.watch(thumbnailProvider(pair.stem));
-          Widget thumb = thumbAsync.when(
-            loading: () => const Center(
-              child: SizedBox(
-                width: 20,
-                height: 20,
-                child: CircularProgressIndicator(strokeWidth: 2),
+          Widget thumb;
+          if (pair.jpg != null) {
+            // JPG pair: use engine ImageCache directly (no byte-LRU).
+            thumb = Image(
+              image: ResizeImage(
+                FileImage(pair.jpg!),
+                width: 128,
               ),
-            ),
-            error: (err, st) => const Icon(Icons.broken_image, size: 24),
-            data: (bytes) => bytes != null
-                ? Image.memory(
-                    bytes,
-                    cacheWidth: 128,
-                    cacheHeight: 128,
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                  )
-                : const Icon(Icons.image_not_supported, size: 24),
-          );
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (ctx, err, st) =>
+                  const Icon(Icons.broken_image, size: 24),
+            );
+          } else {
+            // RAW-only: use byte-LRU thumbnail.
+            final thumbAsync = ref.watch(thumbnailProvider(pair.stem));
+            thumb = thumbAsync.when(
+              loading: () => const Center(
+                child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+              error: (err, st) => const Icon(Icons.broken_image, size: 24),
+              data: (bytes) => bytes != null
+                  ? Image.memory(
+                      bytes,
+                      cacheWidth: 128,
+                      cacheHeight: 128,
+                      fit: BoxFit.cover,
+                      gaplessPlayback: true,
+                    )
+                  : const Icon(Icons.image_not_supported, size: 24),
+            );
+          }
 
           final cs = Theme.of(context).colorScheme;
           final borderColor = isCurrent

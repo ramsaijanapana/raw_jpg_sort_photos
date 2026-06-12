@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/cull_session.dart';
+import '../core/exif_reader.dart';
 import '../core/exporter.dart';
 import '../core/models.dart';
 import '../core/raw_preview/raw_preview_extractor.dart';
@@ -223,6 +225,37 @@ final thumbnailProvider =
 
     cache.lru.put(stem, bytes);
     return bytes;
+  },
+);
+
+// ---------------------------------------------------------------------------
+// EXIF FutureProvider.family (autoDispose, runs in isolate)
+// ---------------------------------------------------------------------------
+
+/// Provides [ExifSummary?] for a given photo stem.
+/// Reads the JPG bytes if present, else the first 512 KB of the RAW file.
+/// Parsing runs in a separate isolate so the UI thread stays responsive.
+final exifProvider =
+    FutureProvider.autoDispose.family<ExifSummary?, String>(
+  (ref, stem) async {
+    final pair = _lookupPair(ref, stem);
+    if (pair == null) return null;
+
+    Uint8List bytes;
+    if (pair.jpg != null) {
+      bytes = await pair.jpg!.readAsBytes();
+    } else {
+      // Read only first 512 KB for EXIF header parsing.
+      final raf = await pair.raw.open();
+      try {
+        final length = (await pair.raw.length()).clamp(0, 512 * 1024);
+        bytes = await raf.read(length);
+      } finally {
+        await raf.close();
+      }
+    }
+
+    return Isolate.run(() => readExifSummary(bytes));
   },
 );
 

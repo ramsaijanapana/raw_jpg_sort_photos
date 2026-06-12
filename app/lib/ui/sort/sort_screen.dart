@@ -1,3 +1,7 @@
+import 'dart:io';
+
+import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
@@ -24,19 +28,12 @@ class SortScreen extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Header row
-                Wrap(
-                  spacing: 12,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text(
-                      'Sort Photos',
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    _RawJpgChip(),
-                  ],
+                // Header row (no chip)
+                Text(
+                  'Sort Photos',
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
                 const SizedBox(height: 8),
                 // Subtitle
@@ -48,10 +45,11 @@ class SortScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 24),
 
-                // Folder pick card
+                // Folder pick card (hero + drop zone)
                 _FolderPickCard(
                   inputPath: state.inputPath,
                   onTap: sorting ? null : () => ctrl.pickInput(),
+                  onDropPath: sorting ? null : (path) => ctrl.setInput(path),
                 ),
                 const SizedBox(height: 20),
 
@@ -62,17 +60,33 @@ class SortScreen extends ConsumerWidget {
                 ),
                 const SizedBox(height: 24),
 
-                // Sort button
+                // Sort button or Cancel button
                 SizedBox(
                   height: 52,
-                  child: FilledButton(
-                    onPressed:
-                        sorting || state.inputPath == null
-                            ? null
-                            : () => ctrl.start(),
-                    child: const Text('Sort Photos'),
-                  ),
+                  child: sorting
+                      ? OutlinedButton(
+                          onPressed: () => ctrl.cancel(),
+                          child: const Text('Cancel'),
+                        )
+                      : FilledButton(
+                          onPressed: state.inputPath == null
+                              ? null
+                              : () => ctrl.start(),
+                          child: const Text('Sort Photos'),
+                        ),
                 ),
+
+                // "Choose a folder to enable" hint when disabled
+                if (!sorting && state.inputPath == null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    'Choose a folder to enable',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
 
                 // Progress indicator
                 if (sorting) ...[
@@ -95,7 +109,7 @@ class SortScreen extends ConsumerWidget {
 
                 const SizedBox(height: 20),
 
-                // Status card
+                // Status card (no idle card)
                 _StatusCard(state: state),
               ],
             ),
@@ -107,118 +121,236 @@ class SortScreen extends ConsumerWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Chips / sub-widgets
+// Folder pick card with drop zone
 // ---------------------------------------------------------------------------
 
-class _RawJpgChip extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: cs.secondaryContainer,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        'RAW / JPG',
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: cs.onSecondaryContainer,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-}
-
-class _FolderPickCard extends StatelessWidget {
+class _FolderPickCard extends StatefulWidget {
   const _FolderPickCard({
     required this.inputPath,
     required this.onTap,
+    required this.onDropPath,
   });
 
   final String? inputPath;
   final VoidCallback? onTap;
+  final void Function(String path)? onDropPath;
+
+  @override
+  State<_FolderPickCard> createState() => _FolderPickCardState();
+}
+
+class _FolderPickCardState extends State<_FolderPickCard> {
+  bool _dragging = false;
+
+  bool get _isDesktop =>
+      !kIsWeb && (Platform.isLinux || Platform.isMacOS || Platform.isWindows);
+
+  void _handleDrop(DropDoneDetails details) {
+    if (widget.onDropPath == null) return;
+    final files = details.files;
+    if (files.isEmpty) return;
+    final first = files.first.path;
+    // If it's a directory use it directly; otherwise use parent.
+    final dir = Directory(first);
+    if (dir.existsSync()) {
+      widget.onDropPath!(first);
+    } else {
+      widget.onDropPath!(p.dirname(first));
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final hasFolder = inputPath != null;
+    final hasFolder = widget.inputPath != null;
 
-    return Card(
-      shape: RoundedRectangleBorder(
+    Widget card = AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      constraints: const BoxConstraints(minHeight: 140),
+      decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(
-          color: hasFolder ? cs.primary : cs.outlineVariant,
-          width: hasFolder ? 2 : 1,
+        border: Border.all(
+          color: _dragging
+              ? cs.primary
+              : hasFolder
+                  ? cs.primary
+                  : cs.outline,
+          width: _dragging ? 2.0 : (hasFolder ? 2.0 : 1.5),
         ),
+        color: _dragging
+            ? cs.primary.withValues(alpha: 0.08)
+            : theme.colorScheme.surface,
       ),
-      clipBehavior: Clip.antiAlias,
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
-        onTap: onTap,
+        onTap: widget.onTap,
         child: Padding(
           padding: const EdgeInsets.all(20),
-          child: Row(
+          child: _dragging
+              ? _DropHint(cs: cs)
+              : hasFolder
+                  ? _FolderContent(
+                      inputPath: widget.inputPath!,
+                      theme: theme,
+                      cs: cs,
+                    )
+                  : _EmptyContent(
+                      theme: theme,
+                      cs: cs,
+                      isDesktop: _isDesktop,
+                    ),
+        ),
+      ),
+    );
+
+    if (_isDesktop) {
+      card = DropTarget(
+        onDragEntered: (_) => setState(() => _dragging = true),
+        onDragExited: (_) => setState(() => _dragging = false),
+        onDragDone: (details) {
+          setState(() => _dragging = false);
+          _handleDrop(details);
+        },
+        child: card,
+      );
+    }
+
+    return card;
+  }
+}
+
+class _DropHint extends StatelessWidget {
+  const _DropHint({required this.cs});
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: cs.primaryContainer,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.drive_folder_upload_outlined,
+              color: cs.onPrimaryContainer),
+        ),
+        const SizedBox(width: 16),
+        Text(
+          'Drop folder to sort',
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+            color: cs.primary,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FolderContent extends StatelessWidget {
+  const _FolderContent({
+    required this.inputPath,
+    required this.theme,
+    required this.cs,
+  });
+  final String inputPath;
+  final ThemeData theme;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: cs.secondaryContainer,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(Icons.folder_open, color: cs.onSecondaryContainer),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 48,
-                height: 48,
-                decoration: BoxDecoration(
-                  color: cs.secondaryContainer,
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  Icons.folder_open,
-                  color: cs.onSecondaryContainer,
+              Text(
+                p.basename(inputPath),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: hasFolder
-                    ? Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            p.basename(inputPath!),
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            inputPath!,
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: cs.onSurfaceVariant,
-                            ),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ],
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Choose your photo folder',
-                            style: theme.textTheme.titleMedium,
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'Tap to browse',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
+              const SizedBox(height: 2),
+              Text(
+                inputPath,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+                overflow: TextOverflow.ellipsis,
               ),
-              if (hasFolder)
-                Icon(Icons.check_circle, color: Colors.green.shade600),
             ],
           ),
         ),
-      ),
+        Icon(Icons.check_circle, color: Colors.green.shade600),
+      ],
+    );
+  }
+}
+
+class _EmptyContent extends StatelessWidget {
+  const _EmptyContent({
+    required this.theme,
+    required this.cs,
+    required this.isDesktop,
+  });
+  final ThemeData theme;
+  final ColorScheme cs;
+  final bool isDesktop;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: cs.secondaryContainer,
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            Icons.create_new_folder_outlined,
+            color: cs.onSecondaryContainer,
+            size: 32,
+          ),
+        ),
+        const SizedBox(width: 16),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Choose your photo folder',
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 2),
+              Text(
+                isDesktop
+                    ? 'Click to browse — or drop a folder here'
+                    : 'Tap to browse',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -249,7 +381,7 @@ class _OutputRow extends StatelessWidget {
             const Spacer(),
             Flexible(
               child: Text(
-                'optional — defaults to input folder',
+                'optional',
                 style: theme.textTheme.labelSmall?.copyWith(
                   color: cs.onSurfaceVariant,
                 ),
@@ -307,29 +439,8 @@ class _StatusCard extends StatelessWidget {
 
     switch (state.phase) {
       case SortPhase.idle:
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Ready when you are',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Results will appear here after sorting.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: cs.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
+        // No idle card — show nothing.
+        return const SizedBox.shrink();
 
       case SortPhase.sorting:
         return const SizedBox.shrink();
@@ -393,6 +504,33 @@ class _StatusCard extends StatelessWidget {
                       ),
                     ),
                   ],
+                ),
+              ],
+            ),
+          ),
+        );
+
+      case SortPhase.cancelled:
+        return Card(
+          color: cs.tertiaryContainer,
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Sort stopped',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: cs.onTertiaryContainer,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  state.message ?? 'Sort was cancelled.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: cs.onTertiaryContainer,
+                  ),
                 ),
               ],
             ),

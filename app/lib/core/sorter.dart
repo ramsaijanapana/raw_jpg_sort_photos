@@ -18,6 +18,7 @@ Future<SortResult> sortPhotos({
   required Directory input,
   required Directory output,
   void Function(SortProgress)? onProgress,
+  bool Function()? shouldCancel,
 }) async {
   // Create the output directory first so it exists for the comparison and any
   // subsequent file operations.
@@ -57,8 +58,14 @@ Future<SortResult> sortPhotos({
   int jpgCount = 0;
   int skipped = 0;
   int processed = 0;
+  bool wasCancelled = false;
 
   for (final file in files) {
+    // Check for cancellation at the top of each iteration.
+    if (shouldCancel != null && shouldCancel()) {
+      wasCancelled = true;
+      break;
+    }
     final ext = p.extension(file.path).toLowerCase();
     final isRawFile = rawExtensions.contains(ext);
     final destDir = Directory(p.join(output.path, isRawFile ? 'RAW' : 'JPG'));
@@ -102,6 +109,7 @@ Future<SortResult> sortPhotos({
     skipped: skipped,
     moved: sameDir,
     outputPath: output.path,
+    cancelled: wasCancelled,
   );
 }
 

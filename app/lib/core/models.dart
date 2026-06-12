@@ -42,6 +42,8 @@ class SortResult {
   final int skipped;
   final bool moved;
   final String outputPath;
+  /// True when the sort was cancelled before all files were processed.
+  final bool cancelled;
 
   const SortResult({
     required this.rawCount,
@@ -49,11 +51,12 @@ class SortResult {
     required this.skipped,
     required this.moved,
     required this.outputPath,
+    this.cancelled = false,
   });
 
   @override
   String toString() =>
-      'SortResult(raw: $rawCount, jpg: $jpgCount, skipped: $skipped, moved: $moved, output: $outputPath)';
+      'SortResult(raw: $rawCount, jpg: $jpgCount, skipped: $skipped, moved: $moved, output: $outputPath, cancelled: $cancelled)';
 }
 
 /// Result returned after exporting kept photos.

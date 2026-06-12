@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 const _kLastCullDir = 'lastCullDir';
 const _kLastSortInput = 'lastSortInput';
+const _kShowExif = 'showExif';
 
 /// Thin SharedPreferences wrapper that stores only two local path strings.
 class PrefsService {
@@ -20,6 +21,11 @@ class PrefsService {
 
   Future<void> setLastSortInput(String path) =>
       _prefs.setString(_kLastSortInput, path);
+
+  bool get showExif => _prefs.getBool(_kShowExif) ?? true;
+
+  Future<void> setShowExif(bool value) =>
+      _prefs.setBool(_kShowExif, value);
 
   /// Returns lastCullDir only if the directory actually exists on disk.
   String? get lastCullDirIfExists {

@@ -11,7 +11,7 @@ import '../services/prefs_service.dart';
 // State
 // ---------------------------------------------------------------------------
 
-enum SortPhase { idle, sorting, done, error, empty }
+enum SortPhase { idle, sorting, done, error, empty, cancelled }
 
 class SortUiState {
   const SortUiState({
@@ -59,12 +59,35 @@ class SortUiState {
 // ---------------------------------------------------------------------------
 
 class SortController extends Notifier<SortUiState> {
+  bool _cancelRequested = false;
+
   @override
   SortUiState build() {
     // Prefill inputPath from prefs if the directory still exists.
     final prefs = ref.read(prefsServiceProvider);
     final saved = prefs.lastSortInputIfExists;
     return SortUiState(inputPath: saved);
+  }
+
+  /// Sets the input folder directly (bypasses file picker) and persists it.
+  Future<void> setInput(String path) async {
+    state = state.copyWith(
+      inputPath: path,
+      outputPath: null,
+      result: null,
+      message: null,
+      phase: SortPhase.idle,
+    );
+    try {
+      await ref.read(prefsServiceProvider).setLastSortInput(path);
+    } catch (_) {
+      // Prefs failure is non-fatal.
+    }
+  }
+
+  /// Cancels an in-progress sort.
+  void cancel() {
+    _cancelRequested = true;
   }
 
   Future<void> pickInput() async {
@@ -125,6 +148,7 @@ class SortController extends Notifier<SortUiState> {
     final inputDir = Directory(inputPath);
     final outputDir = Directory(state.outputPath ?? inputPath);
 
+    _cancelRequested = false;
     state = state.copyWith(
       phase: SortPhase.sorting,
       progress: null,
@@ -139,9 +163,18 @@ class SortController extends Notifier<SortUiState> {
         onProgress: (p) {
           state = state.copyWith(phase: SortPhase.sorting, progress: p);
         },
+        shouldCancel: () => _cancelRequested,
       );
 
-      if (result.rawCount == 0 && result.jpgCount == 0) {
+      if (result.cancelled) {
+        final total = (result.rawCount + result.jpgCount + result.skipped);
+        state = state.copyWith(
+          phase: SortPhase.cancelled,
+          result: result,
+          progress: null,
+          message: 'Stopped after $total of ${state.progress?.total ?? total} files — files already sorted stay in place.',
+        );
+      } else if (result.rawCount == 0 && result.jpgCount == 0) {
         state = state.copyWith(
           phase: SortPhase.empty,
           result: result,

@@ -34,8 +34,10 @@ The layout adapts automatically: navigation rail + keyboard-driven culling on de
 - Toggle between the companion JPG and the RAW's embedded preview
 - Filmstrip with color-coded flags: blue = current, green = keep, red (dimmed) = skip
 - Keyboard-first on desktop, swipe + on-screen buttons on mobile
-- Decisions auto-save to `cull_session.json` in the photo folder (compatible with the legacy Python app) — quit anytime, pick up where you left off
+- EXIF overlay (camera · shutter · aperture · ISO · focal length), zoom to true 100% to check focus, undo any decision
+- Decisions auto-save to `cull_session.json` in the photo folder (compatible with the legacy Python app) — quit anytime, resume with one click
 - Export kept RAWs (optionally with their JPGs) to a clean folder for Lightroom import
+- Desktop: drag a folder onto the window to start; the app remembers your last folders
 
 | Key | Action |
 |-----|--------|
@@ -43,8 +45,12 @@ The layout adapts automatically: navigation rail + keyboard-driven culling on de
 | `↑` or `K` | **Keep** — auto-advances to next undecided |
 | `↓` or `X` | **Skip** — auto-advances to next undecided |
 | `U` | Unflag |
-| `R` or `Tab` | Toggle JPG ↔ RAW preview |
+| `Z` / `Ctrl+Z` | Undo the last decision |
+| `Space` or double-click | Zoom to 100% / back to fit |
+| `R` | Toggle JPG ↔ RAW preview |
+| `I` | Toggle the EXIF overlay |
 | `Home` / `End` | First / last photo |
+| `?` | Keyboard shortcuts help |
 
 ---
 
@@ -68,7 +74,7 @@ flutter build apk        # Android
 flutter build ios        # iOS (requires Xcode + signing)
 ```
 
-CI builds all five targets on every push — see `.github/workflows/ci.yml`.
+CI builds all five targets on every push and publishes downloadable artifacts (Linux tar.gz, Windows folder, macOS .app zip, Android APK) — see the Actions tab.
 
 ### Mobile notes
 
