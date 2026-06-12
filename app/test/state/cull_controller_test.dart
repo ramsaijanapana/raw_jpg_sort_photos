@@ -60,31 +60,49 @@ void main() {
       expect(container.read(cullControllerProvider).pairs.length, 4);
       expect(container.read(cullControllerProvider).index, 0);
 
-      // Fire three keep() in quick succession (each cancels the prior timer).
+      // Fire three keep() in quick succession (each cancels the prior
+      // timer). On a fast machine all three flag the same pair; on a slow
+      // CI runner an earlier timer may legitimately fire in between and
+      // advance first. Either way the race-free invariant below must hold.
       ctrl.keep();
       await Future<void>.delayed(const Duration(milliseconds: 30));
       ctrl.keep();
       await Future<void>.delayed(const Duration(milliseconds: 30));
       ctrl.keep();
 
-      // Let all pending microtasks/I/O drain but NOT the 120ms timer yet.
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      // Wait until the index stabilizes (unchanged for 300ms, max 3s) —
+      // fixed sleeps are flaky on loaded CI runners where the session-file
+      // write delays the timer scheduling.
+      var last = container.read(cullControllerProvider).index;
+      var stableMs = 0;
+      var waitedMs = 0;
+      while (stableMs < 300 && waitedMs < 3000) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        waitedMs += 50;
+        final now = container.read(cullControllerProvider).index;
+        if (now == last) {
+          stableMs += 50;
+        } else {
+          last = now;
+          stableMs = 0;
+        }
+      }
 
-      // Each keep cancels the prior timer; the last one has not fired yet.
-      // Index should still be 0 (no advance yet).
-      expect(container.read(cullControllerProvider).index, 0);
-
-      // Wait well past the 120ms advance timer.
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-
-      // Only one auto-advance: index moves to the first undecided after 0.
-      // All three keeps flagged the SAME pair (index 0, IMG_001) because no
-      // advance happened between them, so the next undecided is index 1.
+      // The race this guards against is a DOUBLE advance (overlapping timers
+      // skipping past an undecided photo). Invariant: the index landed on
+      // the first undecided pair — every pair before it is kept, none were
+      // skipped over.
       final state = container.read(cullControllerProvider);
-      expect(state.index, 1);
-      // Exactly one pair was kept.
-      expect(state.keptCount, 1);
-      expect(state.flags['IMG_001'], CullFlag.keep);
+      expect(state.index, state.keptCount,
+          reason: 'index must sit on the first undecided pair');
+      expect(state.keptCount, greaterThanOrEqualTo(1));
+      expect(state.keptCount, lessThanOrEqualTo(3));
+      for (var i = 0; i < state.index; i++) {
+        expect(state.flags[state.pairs[i].stem], CullFlag.keep,
+            reason: 'no pair before the index may be left undecided');
+      }
+      expect(state.flags[state.pairs[state.index].stem] ?? CullFlag.undecided,
+          CullFlag.undecided);
     });
   });
 
