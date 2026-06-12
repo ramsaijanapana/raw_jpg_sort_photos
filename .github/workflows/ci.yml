@@ -76,3 +76,27 @@ jobs:
             apk) flutter build apk --release ;;
             *)   flutter build ${{ matrix.target }} --release ;;
           esac
+
+      - name: Package artifact
+        if: matrix.target != 'ios'
+        shell: bash
+        run: |
+          mkdir -p ../dist
+          case "${{ matrix.target }}" in
+            linux)
+              tar -C build/linux/x64/release/bundle -czf ../dist/photo_sorter-linux-x64.tar.gz . ;;
+            apk)
+              cp build/app/outputs/flutter-apk/app-release.apk ../dist/photo_sorter-android.apk ;;
+            windows)
+              cp -r build/windows/x64/runner/Release ../dist/photo_sorter-windows-x64 ;;
+            macos)
+              ditto -c -k --keepParent build/macos/Build/Products/Release/photo_sorter.app ../dist/photo_sorter-macos.zip ;;
+          esac
+
+      - name: Upload artifact
+        if: matrix.target != 'ios'
+        uses: actions/upload-artifact@v4
+        with:
+          name: photo_sorter-${{ matrix.target }}
+          path: dist/
+          retention-days: 14
