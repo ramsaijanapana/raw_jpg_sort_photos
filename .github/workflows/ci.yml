@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+
+jobs:
+  analyze-test:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.2
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: analyze-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux
+          - os: ubuntu-latest
+            target: apk
+          - os: windows-latest
+            target: windows
+          - os: macos-latest
+            target: macos
+          - os: macos-latest
+            target: ios
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Android)
+        if: matrix.target == 'apk'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Linux desktop dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libgtk-3-dev clang cmake pkg-config
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.2
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Build
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            ios) flutter build ios --release --no-codesign ;;
+            apk) flutter build apk --release ;;
+            *)   flutter build ${{ matrix.target }} --release ;;
+          esac
