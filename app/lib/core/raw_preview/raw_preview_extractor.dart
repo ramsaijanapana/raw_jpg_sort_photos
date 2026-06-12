@@ -32,10 +32,21 @@ Uint8List? extractPreviewBytes(Uint8List bytes, String extension) {
     result = extractTiffPreview(bytes);
   }
 
-  // Always fall back to brute-force JPEG scan
-  result ??= findLargestEmbeddedJpeg(bytes);
+  // Fall back to brute-force JPEG scan when the format-specific path found
+  // nothing, or found only a small thumbnail (some cameras store a tiny
+  // ~160x120 thumb in IFD1 while the real preview lives elsewhere).
+  if (result == null || result.length < _smallPreviewThreshold) {
+    final scanned = findLargestEmbeddedJpeg(bytes);
+    if (scanned != null && scanned.length > (result?.length ?? 0)) {
+      result = scanned;
+    }
+  }
   return result;
 }
+
+/// Previews smaller than this are treated as thumbnails, prompting a scan
+/// for a larger embedded JPEG.
+const int _smallPreviewThreshold = 65536;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CR3 (ISO Base Media File Format / BMFF)
