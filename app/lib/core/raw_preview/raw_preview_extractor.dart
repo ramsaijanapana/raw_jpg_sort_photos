@@ -1,15 +1,20 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'jpeg_scan.dart';
 import 'tiff_ifd.dart';
 
-/// Extracts a JPEG preview from [rawFile].
+/// Extracts a JPEG preview from [rawFile] in a background isolate.
 ///
-/// Avoids reading whole 20-40MB RAW files when possible by using a
-/// [RandomAccessFile] to read only the header and the candidate preview slice.
-/// Falls back to reading the entire file and calling [extractPreviewBytes]
-/// whenever the ranged path cannot produce a valid JPEG.
-Future<Uint8List?> extractPreview(File rawFile) async {
+/// The actual extraction is pure Dart (no dart:ui), so it is safe to run in
+/// a separate isolate via [Isolate.run].
+Future<Uint8List?> extractPreview(File rawFile) {
+  final path = rawFile.path;
+  return Isolate.run(() => _extractPreviewImpl(File(path)));
+}
+
+/// The actual extraction logic — runs in the isolate spawned by [extractPreview].
+Future<Uint8List?> _extractPreviewImpl(File rawFile) async {
   final ext = _extensionOf(rawFile.path).toLowerCase();
 
   if (ext == '.raf') {

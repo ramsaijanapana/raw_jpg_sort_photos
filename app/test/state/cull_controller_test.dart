@@ -3,13 +3,25 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:photo_sorter/core/models.dart';
+import 'package:photo_sorter/services/prefs_service.dart';
 import 'package:photo_sorter/state/cull_controller.dart';
+
+/// Returns a [ProviderContainer] with a no-op [PrefsService] override.
+Future<ProviderContainer> makeContainer() async {
+  SharedPreferences.setMockInitialValues({});
+  final prefs = await SharedPreferences.getInstance();
+  final container = ProviderContainer(
+    overrides: [prefsServiceProvider.overrideWithValue(PrefsService(prefs))],
+  );
+  return container;
+}
 
 void main() {
   group('goto with empty pairs (P0-4 regression)', () {
-    test('End / Home / nav do not throw when no folder is open', () {
-      final container = ProviderContainer();
+    test('End / Home / nav do not throw when no folder is open', () async {
+      final container = await makeContainer();
       addTearDown(container.dispose);
       final ctrl = container.read(cullControllerProvider.notifier);
 
@@ -39,7 +51,7 @@ void main() {
         File(p.join(tmp.path, name)).writeAsBytesSync([0, 1, 2, 3]);
       }
 
-      final container = ProviderContainer();
+      final container = await makeContainer();
       addTearDown(container.dispose);
       final ctrl = container.read(cullControllerProvider.notifier);
 
@@ -95,7 +107,7 @@ void main() {
       await File(p.join(dirB.path, 'cull_session.json'))
           .writeAsString('{"B_001":"keep"}');
 
-      final container = ProviderContainer();
+      final container = await makeContainer();
       addTearDown(container.dispose);
       final ctrl = container.read(cullControllerProvider.notifier);
 
@@ -110,6 +122,120 @@ void main() {
           ['B_001', 'B_002', 'B_003']);
       expect(state.flags['B_001'], CullFlag.keep);
       expect(state.dir!.path, dirB.path);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Undo tests (Wave 1 - spec §1.2)
+  // -------------------------------------------------------------------------
+
+  group('undo stack', () {
+    test('flag K, X, K on 3 fake pairs → undo() restores in reverse order',
+        () async {
+      final tmp = Directory.systemTemp.createTempSync('undo_test_');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      for (final name in ['P001.ARW', 'P002.ARW', 'P003.ARW']) {
+        File(p.join(tmp.path, name)).writeAsBytesSync([0, 1, 2, 3]);
+      }
+
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+
+      await ctrl.openFolder(tmp.path);
+      // Navigate: flag P001 = keep
+      ctrl.goto(0);
+      await ctrl.keep();
+      // Navigate: flag P002 = skip
+      ctrl.goto(1);
+      await ctrl.skip();
+      // Navigate: flag P003 = keep
+      ctrl.goto(2);
+      await ctrl.keep();
+
+      var state = container.read(cullControllerProvider);
+      expect(state.flags['P001'], CullFlag.keep);
+      expect(state.flags['P002'], CullFlag.skip);
+      expect(state.flags['P003'], CullFlag.keep);
+      expect(state.index, 2);
+
+      // Undo P003 keep → undecided, index returns to 2
+      await ctrl.undo();
+      state = container.read(cullControllerProvider);
+      expect(state.flags['P003'], isNull); // undecided = not in map
+      expect(state.index, 2);
+
+      // Undo P002 skip → undecided, index returns to 1
+      await ctrl.undo();
+      state = container.read(cullControllerProvider);
+      expect(state.flags['P002'], isNull);
+      expect(state.index, 1);
+
+      // Undo P001 keep → undecided, index returns to 0
+      await ctrl.undo();
+      state = container.read(cullControllerProvider);
+      expect(state.flags['P001'], isNull);
+      expect(state.index, 0);
+
+      // Undo on empty stack is no-op
+      await ctrl.undo();
+      state = container.read(cullControllerProvider);
+      expect(state.keptCount, 0);
+      expect(state.skipCount, 0);
+    });
+
+    test('undo after openFolder clears the stack', () async {
+      final tmp1 = Directory.systemTemp.createTempSync('undo_clear1_');
+      final tmp2 = Directory.systemTemp.createTempSync('undo_clear2_');
+      addTearDown(() {
+        tmp1.deleteSync(recursive: true);
+        tmp2.deleteSync(recursive: true);
+      });
+      for (final name in ['A001.ARW', 'A002.ARW']) {
+        File(p.join(tmp1.path, name)).writeAsBytesSync([0]);
+        File(p.join(tmp2.path, name)).writeAsBytesSync([0]);
+      }
+
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+
+      await ctrl.openFolder(tmp1.path);
+      ctrl.goto(0);
+      await ctrl.keep();
+      expect(container.read(cullControllerProvider).keptCount, 1);
+
+      // Re-open a DIFFERENT folder clears undo stack.
+      await ctrl.openFolder(tmp2.path);
+      await ctrl.undo(); // should be no-op (stack was cleared)
+      final state = container.read(cullControllerProvider);
+      // Folder 2 has no flags → kept count should be 0.
+      expect(state.keptCount, 0);
+    });
+
+    test('session file updated after undo', () async {
+      final tmp = Directory.systemTemp.createTempSync('undo_session_');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      for (final name in ['Q001.ARW']) {
+        File(p.join(tmp.path, name)).writeAsBytesSync([0]);
+      }
+
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+
+      await ctrl.openFolder(tmp.path);
+      ctrl.goto(0);
+      await ctrl.keep();
+
+      var sessionFile = File(p.join(tmp.path, 'cull_session.json'));
+      expect(await sessionFile.readAsString(), contains('"Q001":"keep"'));
+
+      await ctrl.undo();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      final content = await sessionFile.readAsString();
+      // After undo, Q001 is undecided so should not appear in the session.
+      expect(content, isNot(contains('"Q001"')));
     });
   });
 }

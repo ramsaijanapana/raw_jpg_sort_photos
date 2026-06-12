@@ -8,12 +8,21 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'main.dart';
+import 'services/prefs_service.dart';
 import 'state/cull_controller.dart';
 
-void main() {
-  runApp(const ProviderScope(child: _DemoLauncher()));
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final prefs = await SharedPreferences.getInstance();
+  runApp(ProviderScope(
+    overrides: [
+      prefsServiceProvider.overrideWithValue(PrefsService(prefs)),
+    ],
+    child: const _DemoLauncher(),
+  ));
 }
 
 class _DemoLauncher extends ConsumerStatefulWidget {

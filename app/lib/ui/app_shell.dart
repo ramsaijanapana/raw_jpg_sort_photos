@@ -33,60 +33,70 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final isWide = constraints.maxWidth >= 720;
+    return PopScope(
+      // Only allow system back to pop when on the Sort tab (tab 0).
+      // On the Review tab (tab 1), back returns to Sort tab instead.
+      canPop: _selectedIndex == 0,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _selectedIndex != 0) {
+          setState(() => _selectedIndex = 0);
+        }
+      },
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final isWide = constraints.maxWidth >= 720;
 
-        if (isWide) {
-          return Scaffold(
-            body: Row(
-              children: [
-                NavigationRail(
-                  labelType: NavigationRailLabelType.all,
-                  selectedIndex: _selectedIndex,
-                  onDestinationSelected: (i) =>
-                      setState(() => _selectedIndex = i),
-                  destinations: [
-                    for (final d in _destinations)
-                      NavigationRailDestination(
-                        icon: d.icon,
-                        selectedIcon: d.selectedIcon,
-                        label: Text(d.label),
-                      ),
-                  ],
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: IndexedStack(
-                    index: _selectedIndex,
-                    children: _pages,
+          if (isWide) {
+            return Scaffold(
+              body: Row(
+                children: [
+                  NavigationRail(
+                    labelType: NavigationRailLabelType.all,
+                    selectedIndex: _selectedIndex,
+                    onDestinationSelected: (i) =>
+                        setState(() => _selectedIndex = i),
+                    destinations: [
+                      for (final d in _destinations)
+                        NavigationRailDestination(
+                          icon: d.icon,
+                          selectedIcon: d.selectedIcon,
+                          label: Text(d.label),
+                        ),
+                    ],
                   ),
-                ),
+                  const VerticalDivider(width: 1),
+                  Expanded(
+                    child: IndexedStack(
+                      index: _selectedIndex,
+                      children: _pages,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return Scaffold(
+            body: IndexedStack(
+              index: _selectedIndex,
+              children: _pages,
+            ),
+            bottomNavigationBar: NavigationBar(
+              selectedIndex: _selectedIndex,
+              onDestinationSelected: (i) =>
+                  setState(() => _selectedIndex = i),
+              destinations: [
+                for (final d in _destinations)
+                  NavigationDestination(
+                    icon: d.icon,
+                    selectedIcon: d.selectedIcon,
+                    label: d.label,
+                  ),
               ],
             ),
           );
-        }
-
-        return Scaffold(
-          body: IndexedStack(
-            index: _selectedIndex,
-            children: _pages,
-          ),
-          bottomNavigationBar: NavigationBar(
-            selectedIndex: _selectedIndex,
-            onDestinationSelected: (i) =>
-                setState(() => _selectedIndex = i),
-            destinations: [
-              for (final d in _destinations)
-                NavigationDestination(
-                  icon: d.icon,
-                  selectedIcon: d.selectedIcon,
-                  label: d.label,
-                ),
-            ],
-          ),
-        );
-      },
+        },
+      ),
     );
   }
 }

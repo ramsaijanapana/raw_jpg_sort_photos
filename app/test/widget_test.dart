@@ -5,24 +5,38 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:photo_sorter/core/models.dart';
 import 'package:photo_sorter/main.dart';
+import 'package:photo_sorter/services/prefs_service.dart';
 import 'package:photo_sorter/state/cull_controller.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Returns a [PrefsService] backed by mock SharedPreferences.
+Future<PrefsService> makeMockPrefs([Map<String, Object> initial = const {}]) async {
+  SharedPreferences.setMockInitialValues(initial);
+  final prefs = await SharedPreferences.getInstance();
+  return PrefsService(prefs);
+}
+
 /// Pump the app at a given logical size.
 Future<void> pumpApp(
   WidgetTester tester,
-  Size logicalSize,
-) async {
+  Size logicalSize, [
+  PrefsService? prefs,
+]) async {
+  prefs ??= await makeMockPrefs();
   tester.view.physicalSize =
       logicalSize * tester.view.devicePixelRatio;
   await tester.pumpWidget(
-    const ProviderScope(child: PhotoSorterApp()),
+    ProviderScope(
+      overrides: [prefsServiceProvider.overrideWithValue(prefs)],
+      child: const PhotoSorterApp(),
+    ),
   );
   await tester.pumpAndSettle();
 }
@@ -71,6 +85,7 @@ void main() {
 
   // 3. Review screen shows empty hint.
   testWidgets('review screen shows empty hint', (tester) async {
+    // No saved dir → shows empty hint text.
     await pumpApp(tester, const Size(1100, 760));
 
     // Tap the Review destination.
@@ -113,7 +128,10 @@ void main() {
 
     tester.view.physicalSize =
         const Size(1100, 760) * tester.view.devicePixelRatio;
-    final container = ProviderContainer();
+    final prefs = await makeMockPrefs();
+    final container = ProviderContainer(
+      overrides: [prefsServiceProvider.overrideWithValue(prefs)],
+    );
     addTearDown(container.dispose);
     await tester.pumpWidget(
       UncontrolledProviderScope(
@@ -174,7 +192,10 @@ void main() {
 
     tester.view.physicalSize =
         const Size(360, 700) * tester.view.devicePixelRatio;
-    final container = ProviderContainer();
+    final prefs = await makeMockPrefs();
+    final container = ProviderContainer(
+      overrides: [prefsServiceProvider.overrideWithValue(prefs)],
+    );
     addTearDown(container.dispose);
 
     await tester.pumpWidget(
@@ -209,7 +230,10 @@ void main() {
       await arw2.writeAsBytes([4, 5, 6, 7]);
       await jpg1.writeAsBytes([8, 9, 10, 11]);
 
-      final container = ProviderContainer();
+      final prefs = await makeMockPrefs();
+      final container = ProviderContainer(
+        overrides: [prefsServiceProvider.overrideWithValue(prefs)],
+      );
       addTearDown(container.dispose);
 
       final ctrl = container.read(cullControllerProvider.notifier);
