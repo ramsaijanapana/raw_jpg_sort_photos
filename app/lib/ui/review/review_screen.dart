@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -51,10 +52,29 @@ class _ReviewBody extends ConsumerStatefulWidget {
 
 class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   final _filmstripController = ScrollController();
+  final _shortcutFocus = FocusNode(debugLabel: 'review-shortcuts');
+  ValueListenable<TickerModeData>? _visibility;
   static const double _itemExtent = 68.0;
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // The shell keeps pages alive in an IndexedStack; TickerMode tells us
+    // when this page actually becomes visible so we can claim keyboard focus.
+    _visibility?.removeListener(_onVisibilityChanged);
+    _visibility = TickerMode.getValuesNotifier(context);
+    _visibility!.addListener(_onVisibilityChanged);
+    if (_visibility!.value.enabled) _shortcutFocus.requestFocus();
+  }
+
+  void _onVisibilityChanged() {
+    if (_visibility?.value.enabled ?? false) _shortcutFocus.requestFocus();
+  }
+
+  @override
   void dispose() {
+    _visibility?.removeListener(_onVisibilityChanged);
+    _shortcutFocus.dispose();
     _filmstripController.dispose();
     super.dispose();
   }
@@ -81,6 +101,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       body: _KeyboardHandler(
+        focusNode: _shortcutFocus,
         onNav: (d) {
           ctrl.nav(d);
           _scrollFilmstripTo(state.index + d);
@@ -158,6 +179,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
 class _KeyboardHandler extends StatelessWidget {
   const _KeyboardHandler({
     required this.child,
+    required this.focusNode,
     required this.onNav,
     required this.onKeep,
     required this.onSkip,
@@ -168,6 +190,7 @@ class _KeyboardHandler extends StatelessWidget {
   });
 
   final Widget child;
+  final FocusNode focusNode;
   final void Function(int) onNav;
   final VoidCallback onKeep;
   final VoidCallback onSkip;
@@ -178,23 +201,31 @@ class _KeyboardHandler extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Focus(
-      autofocus: true,
-      child: CallbackShortcuts(
-        bindings: {
-          const SingleActivator(LogicalKeyboardKey.arrowLeft): () => onNav(-1),
-          const SingleActivator(LogicalKeyboardKey.arrowRight): () => onNav(1),
-          const SingleActivator(LogicalKeyboardKey.arrowUp): onKeep,
-          const SingleActivator(LogicalKeyboardKey.keyK): onKeep,
-          const SingleActivator(LogicalKeyboardKey.arrowDown): onSkip,
-          const SingleActivator(LogicalKeyboardKey.keyX): onSkip,
-          const SingleActivator(LogicalKeyboardKey.keyU): onUnflag,
-          const SingleActivator(LogicalKeyboardKey.keyR): onToggleMode,
-          const SingleActivator(LogicalKeyboardKey.tab): onToggleMode,
-          const SingleActivator(LogicalKeyboardKey.home): onFirst,
-          const SingleActivator(LogicalKeyboardKey.end): onLast,
-        },
-        child: child,
+    // CallbackShortcuts must be the ANCESTOR of the focused node: key events
+    // bubble up from the primary focus through its ancestors, so the inverse
+    // nesting (Focus outside CallbackShortcuts) never receives any event.
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () => onNav(-1),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () => onNav(1),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): onKeep,
+        const SingleActivator(LogicalKeyboardKey.keyK): onKeep,
+        const SingleActivator(LogicalKeyboardKey.arrowDown): onSkip,
+        const SingleActivator(LogicalKeyboardKey.keyX): onSkip,
+        const SingleActivator(LogicalKeyboardKey.keyU): onUnflag,
+        const SingleActivator(LogicalKeyboardKey.keyR): onToggleMode,
+        const SingleActivator(LogicalKeyboardKey.tab): onToggleMode,
+        const SingleActivator(LogicalKeyboardKey.home): onFirst,
+        const SingleActivator(LogicalKeyboardKey.end): onLast,
+      },
+      child: Focus(
+        focusNode: focusNode,
+        autofocus: true,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: focusNode.requestFocus,
+          child: child,
+        ),
       ),
     );
   }

@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
@@ -99,7 +100,60 @@ void main() {
     expect(find.byType(NavigationBar), findsNothing);
   });
 
-  // 5. End-to-end-ish: openFolder, keep/skip, session written.
+  // 5. Keyboard shortcuts reach the review screen through real key events.
+  // Regression test: shortcuts were dead because the page lives in an
+  // IndexedStack and the Focus/CallbackShortcuts nesting was inverted.
+  testWidgets('review screen: arrow keys navigate, K/X flag photos',
+      (tester) async {
+    final tmp = await Directory.systemTemp.createTemp('key_test_');
+    addTearDown(() => tmp.delete(recursive: true));
+    for (final name in ['IMG_001.ARW', 'IMG_002.ARW', 'IMG_003.ARW']) {
+      await File(p.join(tmp.path, name))
+          .writeAsBytes(Uint8List.fromList([0, 1, 2, 3]));
+    }
+
+    tester.view.physicalSize =
+        const Size(1100, 760) * tester.view.devicePixelRatio;
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const PhotoSorterApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Switch to the Review tab and load the folder.
+    await tester.tap(find.text('Review').last);
+    await tester.pumpAndSettle();
+    await container.read(cullControllerProvider.notifier).openFolder(tmp.path);
+    await tester.pumpAndSettle();
+
+    // Real key events, not controller calls.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(container.read(cullControllerProvider).index, 1);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    expect(container.read(cullControllerProvider).flags['IMG_002'],
+        CullFlag.keep);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
+    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    expect(
+      container
+          .read(cullControllerProvider)
+          .flags
+          .values
+          .where((f) => f == CullFlag.skip)
+          .length,
+      1,
+    );
+  });
+
+  // 6. End-to-end-ish: openFolder, keep/skip, session written.
   test('cull_controller: openFolder, keep, skip, session file written',
       () async {
     // Create a temp dir with fake .ARW and .JPG files.
