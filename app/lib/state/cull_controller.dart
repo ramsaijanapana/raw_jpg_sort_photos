@@ -10,6 +10,7 @@ import '../core/exporter.dart';
 import '../core/models.dart';
 import '../core/raw_preview/raw_preview_extractor.dart';
 import '../core/scanner.dart';
+import '../services/prefs_service.dart';
 
 // ---------------------------------------------------------------------------
 // State
@@ -68,6 +69,8 @@ class CullState {
 
   int get undecidedCount =>
       pairs.length - keptCount - skipCount;
+
+  int get decidedCount => keptCount + skipCount;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +166,7 @@ class PreviewCache {
 
 /// Holds the filmstrip thumbnail LRU keyed by stem.
 class ThumbnailCache {
-  final lru = LruCache<String, Uint8List?>(8 * 1024 * 1024, _previewSizeOf);
+  final lru = LruCache<String, Uint8List?>(64 * 1024 * 1024, _previewSizeOf);
 }
 
 final previewCacheProvider = Provider<PreviewCache>((_) => PreviewCache());
@@ -241,6 +244,10 @@ class CullController extends Notifier<CullState> {
   Timer? _advanceTimer;
   int _openGeneration = 0;
 
+  /// Undo stack: each entry records the stem, previous flag, and index at the
+  /// time of the change. Capped at 50 entries.
+  final List<({String stem, CullFlag prev, int index})> _undoStack = [];
+
   @override
   CullState build() {
     ref.onDispose(() => _advanceTimer?.cancel());
@@ -251,6 +258,7 @@ class CullController extends Notifier<CullState> {
     _advanceTimer?.cancel();
     final gen = ++_openGeneration;
 
+    _undoStack.clear();
     state = state.copyWith(loading: true, error: null);
 
     try {
@@ -270,6 +278,13 @@ class CullController extends Notifier<CullState> {
         error: null,
       );
 
+      // Persist the folder path for 'Resume' feature.
+      try {
+        await ref.read(prefsServiceProvider).setLastCullDir(path);
+      } catch (_) {
+        // Prefs failure is non-fatal.
+      }
+
       _preloadNeighbors(0);
     } catch (e) {
       if (gen != _openGeneration) return;
@@ -278,6 +293,26 @@ class CullController extends Notifier<CullState> {
         error: 'Failed to open folder: $e',
       );
     }
+  }
+
+  /// Undo the last flag change: restores the previous flag and navigates
+  /// back to the affected photo. No-op when the stack is empty.
+  Future<void> undo() async {
+    if (_undoStack.isEmpty) return;
+    final entry = _undoStack.removeLast();
+
+    final newFlags = Map<String, CullFlag>.from(state.flags);
+    if (entry.prev == CullFlag.undecided) {
+      newFlags.remove(entry.stem);
+    } else {
+      newFlags[entry.stem] = entry.prev;
+    }
+
+    state = state.copyWith(
+      flags: Map.unmodifiable(newFlags),
+      index: entry.index,
+    );
+    await _saveSession();
   }
 
   void goto(int index) {
@@ -338,6 +373,11 @@ class CullController extends Notifier<CullState> {
   Future<void> _setFlag(CullFlag flag) async {
     final pair = state.currentPair;
     if (pair == null) return;
+
+    // Push undo entry BEFORE mutating.
+    final prev = state.flags[pair.stem] ?? CullFlag.undecided;
+    _undoStack.add((stem: pair.stem, prev: prev, index: state.index));
+    if (_undoStack.length > 50) _undoStack.removeAt(0);
 
     final newFlags = Map<String, CullFlag>.from(state.flags);
     if (flag == CullFlag.undecided) {

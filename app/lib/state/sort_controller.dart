@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/models.dart';
 import '../core/sorter.dart';
 import '../services/file_pick_service.dart';
+import '../services/prefs_service.dart';
 
 // ---------------------------------------------------------------------------
 // State
@@ -59,7 +60,12 @@ class SortUiState {
 
 class SortController extends Notifier<SortUiState> {
   @override
-  SortUiState build() => const SortUiState();
+  SortUiState build() {
+    // Prefill inputPath from prefs if the directory still exists.
+    final prefs = ref.read(prefsServiceProvider);
+    final saved = prefs.lastSortInputIfExists;
+    return SortUiState(inputPath: saved);
+  }
 
   Future<void> pickInput() async {
     final result = await ref
@@ -81,6 +87,12 @@ class SortController extends Notifier<SortUiState> {
         message: null,
         phase: SortPhase.idle,
       );
+      // Persist for next session.
+      try {
+        await ref.read(prefsServiceProvider).setLastSortInput(result.path!);
+      } catch (_) {
+        // Prefs failure is non-fatal.
+      }
     }
   }
 

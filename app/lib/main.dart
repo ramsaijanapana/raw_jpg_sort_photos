@@ -3,12 +3,16 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'services/prefs_service.dart';
 import 'ui/app_shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  final prefs = await SharedPreferences.getInstance();
 
   // Initialise window_manager on desktop (but not inside flutter test).
   final isDesktop = !kIsWeb &&
@@ -33,7 +37,12 @@ Future<void> main() async {
     }
   }
 
-  runApp(const ProviderScope(child: PhotoSorterApp()));
+  runApp(ProviderScope(
+    overrides: [
+      prefsServiceProvider.overrideWithValue(PrefsService(prefs)),
+    ],
+    child: const PhotoSorterApp(),
+  ));
 }
 
 class PhotoSorterApp extends StatelessWidget {
