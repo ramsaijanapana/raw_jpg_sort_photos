@@ -38,9 +38,9 @@ Uint8List? _extractTiffPreview(Uint8List bytes) {
   }
 
   // Magic check: accept 42 (standard), 0x4F52, 0x5352 (ORF), 0x55 (RW2), 0x004F (ORF alt)
-  final magic = _readU16(bytes, 2, littleEndian);
-  // We accept any magic for flexibility with camera variants
-  _ = magic; // suppress unused warning
+  // We read the magic but accept any value for flexibility with camera variants.
+  // (ORF uses 0x4F52/0x5352, RW2 uses 0x55 — all handled by walking the IFD.)
+  _readU16(bytes, 2, littleEndian); // magic — validated implicitly
 
   // IFD0 offset
   if (bytes.length < 8) return null;

@@ -33,7 +33,7 @@ class CullSession {
       if (decoded is! Map) return CullSession();
 
       final flags = <String, CullFlag>{};
-      for (final entry in (decoded as Map).entries) {
+      for (final entry in decoded.entries) {
         final stem = entry.key as String;
         final value = entry.value;
         if (value == 'keep') {
