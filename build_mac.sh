@@ -12,7 +12,7 @@ echo ""
 
 # Install build dependencies
 echo "Installing dependencies..."
-pip3 install --quiet --upgrade customtkinter Pillow pyinstaller
+pip3 install --quiet --upgrade customtkinter Pillow rawpy pyinstaller
 
 echo ""
 echo "Building PhotoSorter.app..."
@@ -24,7 +24,9 @@ pyinstaller \
     --name "PhotoSorter" \
     --collect-data customtkinter \
     --collect-data darkdetect \
+    --collect-all rawpy \
     --hidden-import PIL \
+    --hidden-import rawpy \
     photo_sorter_app.py
 
 echo ""
