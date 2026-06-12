@@ -11,7 +11,7 @@ echo =======================================
 echo.
 
 echo Installing dependencies...
-pip install --quiet --upgrade customtkinter pyinstaller
+pip install --quiet --upgrade customtkinter Pillow pyinstaller
 if %errorlevel% neq 0 (
     echo ERROR: pip failed. Make sure Python 3 is installed and on PATH.
     pause & exit /b 1
@@ -27,6 +27,7 @@ pyinstaller ^
     --name "PhotoSorter" ^
     --collect-data customtkinter ^
     --collect-data darkdetect ^
+    --hidden-import PIL ^
     photo_sorter_app.py
 
 echo.
