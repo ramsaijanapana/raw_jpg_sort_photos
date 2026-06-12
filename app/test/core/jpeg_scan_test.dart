@@ -2,11 +2,18 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:photo_sorter/core/raw_preview/jpeg_scan.dart';
 
-// Helper: build a minimal fake JPEG of given size
+// Helper: build a minimal STRUCTURALLY VALID fake JPEG of given size:
+// SOI + APP0 segment + SOS header + zero entropy data + EOI. The scanner
+// walks marker structure, so candidates must be real JPEG skeletons.
 Uint8List fakeJpeg({int size = 100}) {
+  assert(size >= 16);
   final buf = Uint8List(size);
-  buf[0] = 0xFF; buf[1] = 0xD8; buf[2] = 0xFF; // SOI + start of first marker
-  buf[size - 2] = 0xFF; buf[size - 1] = 0xD9;   // EOI
+  buf.setRange(0, 2, [0xFF, 0xD8]); // SOI
+  buf.setRange(2, 8, [0xFF, 0xE0, 0x00, 0x04, 0x4A, 0x46]); // APP0, len 4
+  buf.setRange(8, 12, [0xFF, 0xDA, 0x00, 0x02]); // SOS, len 2
+  // bytes 12 .. size-2 are zero entropy data (no FF bytes)
+  buf[size - 2] = 0xFF;
+  buf[size - 1] = 0xD9; // EOI
   return buf;
 }
 

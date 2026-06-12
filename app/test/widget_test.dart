@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -105,11 +104,11 @@ void main() {
   // IndexedStack and the Focus/CallbackShortcuts nesting was inverted.
   testWidgets('review screen: arrow keys navigate, K/X flag photos',
       (tester) async {
-    final tmp = await Directory.systemTemp.createTemp('key_test_');
-    addTearDown(() => tmp.delete(recursive: true));
+    // Sync I/O: async file futures never complete in the fake-async zone.
+    final tmp = Directory.systemTemp.createTempSync('key_test_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
     for (final name in ['IMG_001.ARW', 'IMG_002.ARW', 'IMG_003.ARW']) {
-      await File(p.join(tmp.path, name))
-          .writeAsBytes(Uint8List.fromList([0, 1, 2, 3]));
+      File(p.join(tmp.path, name)).writeAsBytesSync([0, 1, 2, 3]);
     }
 
     tester.view.physicalSize =
@@ -124,24 +123,31 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // Switch to the Review tab and load the folder.
+    // Switch to the Review tab and load the folder. Real file I/O cannot
+    // complete inside the fake-async test zone, so run it via runAsync and
+    // use bounded pumps (the preview spinner animates indefinitely, which
+    // makes pumpAndSettle hang).
     await tester.tap(find.text('Review').last);
-    await tester.pumpAndSettle();
-    await container.read(cullControllerProvider.notifier).openFolder(tmp.path);
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(
+      () => container.read(cullControllerProvider.notifier).openFolder(
+            tmp.path,
+          ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
 
     // Real key events, not controller calls.
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
-    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 300));
     expect(container.read(cullControllerProvider).index, 1);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
-    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(container.read(cullControllerProvider).flags['IMG_002'],
         CullFlag.keep);
 
     await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
-    await tester.pumpAndSettle(const Duration(milliseconds: 200));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(
       container
           .read(cullControllerProvider)
@@ -162,9 +168,9 @@ void main() {
       final arw1 = File(p.join(tmp.path, 'IMG_001.ARW'));
       final arw2 = File(p.join(tmp.path, 'IMG_002.ARW'));
       final jpg1 = File(p.join(tmp.path, 'IMG_001.jpg'));
-      await arw1.writeAsBytes(Uint8List.fromList([0, 1, 2, 3]));
-      await arw2.writeAsBytes(Uint8List.fromList([4, 5, 6, 7]));
-      await jpg1.writeAsBytes(Uint8List.fromList([8, 9, 10, 11]));
+      await arw1.writeAsBytes([0, 1, 2, 3]);
+      await arw2.writeAsBytes([4, 5, 6, 7]);
+      await jpg1.writeAsBytes([8, 9, 10, 11]);
 
       final container = ProviderContainer();
       addTearDown(container.dispose);

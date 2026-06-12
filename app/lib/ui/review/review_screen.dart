@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,7 +19,11 @@ const _skipColor = Color(0xFFE0564F);
 // ---------------------------------------------------------------------------
 
 class ReviewScreen extends ConsumerWidget {
-  const ReviewScreen({super.key});
+  const ReviewScreen({super.key, this.active = true});
+
+  /// Whether this page is the one currently shown by the shell's
+  /// IndexedStack. Drives keyboard-focus acquisition.
+  final bool active;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -34,7 +37,7 @@ class ReviewScreen extends ConsumerWidget {
         colorScheme: darkScheme,
         useMaterial3: true,
       ),
-      child: const _ReviewBody(),
+      child: _ReviewBody(active: active),
     );
   }
 }
@@ -44,7 +47,9 @@ class ReviewScreen extends ConsumerWidget {
 // ---------------------------------------------------------------------------
 
 class _ReviewBody extends ConsumerStatefulWidget {
-  const _ReviewBody();
+  const _ReviewBody({required this.active});
+
+  final bool active;
 
   @override
   ConsumerState<_ReviewBody> createState() => _ReviewBodyState();
@@ -53,27 +58,32 @@ class _ReviewBody extends ConsumerStatefulWidget {
 class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   final _filmstripController = ScrollController();
   final _shortcutFocus = FocusNode(debugLabel: 'review-shortcuts');
-  ValueListenable<TickerModeData>? _visibility;
   static const double _itemExtent = 68.0;
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    // The shell keeps pages alive in an IndexedStack; TickerMode tells us
-    // when this page actually becomes visible so we can claim keyboard focus.
-    _visibility?.removeListener(_onVisibilityChanged);
-    _visibility = TickerMode.getValuesNotifier(context);
-    _visibility!.addListener(_onVisibilityChanged);
-    if (_visibility!.value.enabled) _shortcutFocus.requestFocus();
+  void initState() {
+    super.initState();
+    _claimFocusIfActive();
   }
 
-  void _onVisibilityChanged() {
-    if (_visibility?.value.enabled ?? false) _shortcutFocus.requestFocus();
+  @override
+  void didUpdateWidget(_ReviewBody oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.active && !oldWidget.active) _claimFocusIfActive();
+  }
+
+  /// The shell keeps pages alive in an IndexedStack, so autofocus alone is
+  /// unreliable: claim keyboard focus post-frame whenever this page becomes
+  /// the visible one (the node must be attached before requestFocus works).
+  void _claimFocusIfActive() {
+    if (!widget.active) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && widget.active) _shortcutFocus.requestFocus();
+    });
   }
 
   @override
   void dispose() {
-    _visibility?.removeListener(_onVisibilityChanged);
     _shortcutFocus.dispose();
     _filmstripController.dispose();
     super.dispose();

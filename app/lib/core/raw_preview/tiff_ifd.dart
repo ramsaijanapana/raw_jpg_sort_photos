@@ -132,8 +132,9 @@ int _walkIfd(
   // Collect JPEG interchange format candidate
   if (jpegOffset > 0 && jpegLength > 0) {
     final slice = _safeSlice(bytes, jpegOffset, jpegOffset + jpegLength);
-    if (slice != null && _isValidJpeg(slice)) {
-      candidates.add(slice);
+    final trimmed = slice == null ? null : _trimToJpeg(slice);
+    if (trimmed != null) {
+      candidates.add(trimmed);
     }
   } else if (jpegOffset > 0) {
     // No length given — scan for the JPEG from offset
@@ -223,6 +224,21 @@ bool _isValidJpeg(Uint8List slice) {
   if (slice[0] != 0xFF || slice[1] != 0xD8) return false;
   if (slice[slice.length - 2] != 0xFF || slice[slice.length - 1] != 0xD9) return false;
   return true;
+}
+
+/// Returns [slice] trimmed to a valid JPEG, tolerating trailing padding.
+///
+/// Cameras frequently pad the declared JPEGInterchangeFormatLength with
+/// 0xFF or zero bytes; the real stream ends at the last FFD9 in the slice.
+Uint8List? _trimToJpeg(Uint8List slice) {
+  if (slice.length < 4 || slice[0] != 0xFF || slice[1] != 0xD8) return null;
+  if (_isValidJpeg(slice)) return slice;
+  for (int i = slice.length - 2; i >= 2; i--) {
+    if (slice[i] == 0xFF && slice[i + 1] == 0xD9) {
+      return Uint8List.sublistView(slice, 0, i + 2);
+    }
+  }
+  return null;
 }
 
 /// Scans forward from [offset] looking for a JPEG stream (FFD8) and its EOI.

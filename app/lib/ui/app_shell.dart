@@ -26,10 +26,10 @@ class _AppShellState extends State<AppShell> {
     ),
   ];
 
-  static const _pages = [
-    SortScreen(),
-    ReviewScreen(),
-  ];
+  List<Widget> get _pages => [
+        const SortScreen(),
+        ReviewScreen(active: _selectedIndex == 1),
+      ];
 
   @override
   Widget build(BuildContext context) {
