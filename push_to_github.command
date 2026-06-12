@@ -1,6 +1,7 @@
 #!/bin/bash
 # push_to_github.command
-# Double-click this on macOS to push the photo sorter scripts to GitHub.
+# Double-click this on macOS to push all changes to GitHub.
+# Works for both first-time pushes and subsequent updates.
 
 cd "$(dirname "$0")"
 
@@ -20,22 +21,27 @@ if ! command -v git &>/dev/null; then
     read -n 1 -s -r -p "Press any key to exit..."; exit 1
 fi
 
-# ── Git init & commit ─────────────────────────────────────────────
-echo "Initialising git..."
-rm -rf .git
-git init -b main
-git add .
-git commit -m "Initial commit: cross-platform photo sorter scripts"
+# ── Remove stale lock file if present ─────────────────────────────
+[ -f .git/index.lock ] && rm -f .git/index.lock
 
-# ── Set remote & push ─────────────────────────────────────────────
-echo ""
-echo "Pushing to GitHub..."
-git remote add origin "$REPO_URL"
-git push -u origin main
+# ── First push vs update ───────────────────────────────────────────
+if [ -d .git ]; then
+    echo "Existing git repo detected — committing and pushing updates..."
+    git add -A
+    git commit -m "Update: loupe viewer, screenshots, README" || echo "(nothing new to commit)"
+    git push
+else
+    echo "Initialising new git repo..."
+    git init -b main
+    git add -A
+    git commit -m "Initial commit: photo sorter + review app with screenshots"
+    git remote add origin "$REPO_URL"
+    git push -u origin main --force
+fi
 
 if [ $? -eq 0 ]; then
     echo ""
-    echo "✓ Done! Scripts are live at:"
+    echo "✓ Done! Repo is live at:"
     echo "  $REPO_URL"
 else
     echo ""
