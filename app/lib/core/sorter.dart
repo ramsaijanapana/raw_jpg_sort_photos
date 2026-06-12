@@ -19,9 +19,15 @@ Future<SortResult> sortPhotos({
   required Directory output,
   void Function(SortProgress)? onProgress,
 }) async {
-  // Resolve both paths to detect same-dir (in-place) operation
-  final inputResolved = input.resolveSymbolicLinksSync();
-  final outputResolved = output.resolveSymbolicLinksSync();
+  // Create the output directory first so it exists for the comparison and any
+  // subsequent file operations.
+  await output.create(recursive: true);
+
+  // Resolve both paths to detect same-dir (in-place) operation. Resolution can
+  // throw when a path does not exist; fall back per-path to a normalized
+  // absolute path so the comparison still works.
+  final inputResolved = _resolveDir(input);
+  final outputResolved = _resolveDir(output);
   final sameDir = inputResolved == outputResolved;
 
   // Collect files (non-recursive, flat listing of input directory)
@@ -97,6 +103,16 @@ Future<SortResult> sortPhotos({
     moved: sameDir,
     outputPath: output.path,
   );
+}
+
+/// Resolves [dir] to a canonical path for same-dir comparison, falling back to
+/// a normalized absolute path when resolution fails (e.g. path not found).
+String _resolveDir(Directory dir) {
+  try {
+    return dir.resolveSymbolicLinksSync();
+  } on FileSystemException {
+    return p.normalize(dir.absolute.path);
+  }
 }
 
 /// Moves [src] to [dest] using rename; falls back to copy+delete on failure

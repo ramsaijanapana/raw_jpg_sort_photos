@@ -5,10 +5,32 @@ import 'tiff_ifd.dart';
 
 /// Extracts a JPEG preview from [rawFile].
 ///
-/// Delegates to [extractPreviewBytes] after reading the file.
+/// Avoids reading whole 20-40MB RAW files when possible by using a
+/// [RandomAccessFile] to read only the header and the candidate preview slice.
+/// Falls back to reading the entire file and calling [extractPreviewBytes]
+/// whenever the ranged path cannot produce a valid JPEG.
 Future<Uint8List?> extractPreview(File rawFile) async {
-  final bytes = await rawFile.readAsBytes();
   final ext = _extensionOf(rawFile.path).toLowerCase();
+
+  if (ext == '.raf') {
+    final ranged = await _extractRafRanged(rawFile);
+    if (ranged != null) return ranged;
+    return _fullFallback(rawFile, ext);
+  }
+
+  if (ext == '.cr3') {
+    // BMFF box walking needs the whole file; full read is acceptable.
+    return _fullFallback(rawFile, ext);
+  }
+
+  // TIFF-based formats: ARW, CR2, NEF, ORF, DNG, RW2, PEF, SRW.
+  final ranged = await _extractTiffRanged(rawFile);
+  if (ranged != null) return ranged;
+  return _fullFallback(rawFile, ext);
+}
+
+Future<Uint8List?> _fullFallback(File rawFile, String ext) async {
+  final bytes = await rawFile.readAsBytes();
   return extractPreviewBytes(bytes, ext);
 }
 
@@ -47,6 +69,109 @@ Uint8List? extractPreviewBytes(Uint8List bytes, String extension) {
 /// Previews smaller than this are treated as thumbnails, prompting a scan
 /// for a larger embedded JPEG.
 const int _smallPreviewThreshold = 65536;
+
+/// How many bytes of a TIFF-based file to read when locating the IFD metadata.
+const int _tiffHeaderReadSize = 512 * 1024;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Ranged (RandomAccessFile) extraction
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Reads only the declared RAF preview slice without loading the whole file.
+///
+/// Returns null on any structural problem; the caller then falls back to a
+/// full read.
+Future<Uint8List?> _extractRafRanged(File rawFile) async {
+  RandomAccessFile? raf;
+  try {
+    raf = await rawFile.open();
+    final fileLength = await raf.length();
+    if (fileLength < 92) return null;
+
+    await raf.setPosition(0);
+    final header = await raf.read(92);
+    if (header.length < 92) return null;
+
+    final offset = _readU32Be(header, 84);
+    final length = _readU32Be(header, 88);
+
+    if (offset == 0 || length == 0) return null;
+    if (offset < 0 || length < 0) return null;
+    if (offset + length > fileLength) return null;
+
+    await raf.setPosition(offset);
+    final slice = await raf.read(length);
+    final trimmed = _validateAndTrimJpeg(slice);
+    return trimmed;
+  } catch (_) {
+    return null;
+  } finally {
+    await raf?.close();
+  }
+}
+
+/// Reads the TIFF header, locates candidate preview ranges, and reads the
+/// largest one without loading the whole file.
+///
+/// Returns null on any structural problem; the caller then falls back to a
+/// full read.
+Future<Uint8List?> _extractTiffRanged(File rawFile) async {
+  RandomAccessFile? raf;
+  try {
+    raf = await rawFile.open();
+    final fileLength = await raf.length();
+    if (fileLength < 8) return null;
+
+    final headerSize =
+        fileLength < _tiffHeaderReadSize ? fileLength : _tiffHeaderReadSize;
+    await raf.setPosition(0);
+    final header = await raf.read(headerSize);
+    if (header.isEmpty) return null;
+
+    final ranges = findTiffPreviewRanges(header);
+    if (ranges.isEmpty) return null;
+
+    // Try candidates largest-declared-length first (findTiffPreviewRanges
+    // already sorts that way). Skip out-of-bounds ranges.
+    for (final range in ranges) {
+      final offset = range.offset;
+      final length = range.length;
+      if (offset <= 0 || length <= 0) continue;
+      if (offset + length > fileLength) continue;
+
+      await raf.setPosition(offset);
+      final slice = await raf.read(length);
+      final trimmed = _validateAndTrimJpeg(slice);
+      if (trimmed != null && trimmed.length >= _smallPreviewThreshold) {
+        return trimmed;
+      }
+    }
+    return null;
+  } catch (_) {
+    return null;
+  } finally {
+    await raf?.close();
+  }
+}
+
+/// Validates [slice] as a JPEG (starts FFD8) and trims any trailing padding
+/// to the last FFD9. Returns null if it is not a JPEG.
+Uint8List? _validateAndTrimJpeg(Uint8List slice) {
+  if (slice.length < 4) return null;
+  if (slice[0] != 0xFF || slice[1] != 0xD8) return null;
+
+  // Already ends exactly at FFD9.
+  if (slice[slice.length - 2] == 0xFF && slice[slice.length - 1] == 0xD9) {
+    return slice;
+  }
+  // Trim trailing padding to the last FFD9.
+  for (int i = slice.length - 2; i >= 2; i--) {
+    if (slice[i] == 0xFF && slice[i + 1] == 0xD9) {
+      return Uint8List.sublistView(slice, 0, i + 2);
+    }
+  }
+  return null;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CR3 (ISO Base Media File Format / BMFF)

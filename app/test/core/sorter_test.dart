@@ -207,6 +207,35 @@ void main() {
     });
   });
 
+  group('sortPhotos — output dir does not exist yet (P0-6)', () {
+    test('creates output dirs and copies without throwing', () async {
+      await createFile(p.join(tmp.path, 'photo.arw'), 'raw_data');
+      // Point at an output path that does not exist yet (resolveSymbolicLinks
+      // would throw on this path).
+      final outDir = Directory(p.join(tmp.path, 'does', 'not', 'exist', 'yet'));
+      expect(outDir.existsSync(), isFalse);
+
+      final result = await sortPhotos(input: tmp, output: outDir);
+
+      expect(result.rawCount, 1);
+      expect(result.moved, isFalse);
+      expect(outDir.existsSync(), isTrue);
+      expect(File(p.join(outDir.path, 'RAW', 'photo.arw')).existsSync(), isTrue);
+      // Original preserved (copy, not move).
+      expect(File(p.join(tmp.path, 'photo.arw')).existsSync(), isTrue);
+    });
+
+    test('same-dir move still detected as move', () async {
+      await createFile(p.join(tmp.path, 'photo.nef'), 'raw');
+
+      final result = await sortPhotos(input: tmp, output: tmp);
+
+      expect(result.moved, isTrue);
+      expect(File(p.join(tmp.path, 'RAW', 'photo.nef')).existsSync(), isTrue);
+      expect(File(p.join(tmp.path, 'photo.nef')).existsSync(), isFalse);
+    });
+  });
+
   group('sortPhotos — rename failure fallback', () {
     test('handles pre-existing dest gracefully (skip path)', () async {
       // This tests the skip logic which exercises the dest.exists() check

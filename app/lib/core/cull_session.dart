@@ -1,3 +1,4 @@
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as p;
@@ -13,10 +14,15 @@ const String cullSessionFileName = 'cull_session.json';
 /// Persisted as JSON: `{"stem": "keep"|"skip"}`. Undecided photos are omitted
 /// from the file. This matches the Python app's format exactly.
 class CullSession {
-  final Map<String, CullFlag> flags;
+  final Map<String, CullFlag> _flags;
 
-  CullSession({Map<String, CullFlag>? flags})
-      : flags = flags ?? {};
+  /// Creates a session, copying [initial] so external mutations of the passed
+  /// map do not leak into the session (and vice versa).
+  CullSession([Map<String, CullFlag>? initial])
+      : _flags = Map<String, CullFlag>.from(initial ?? const {});
+
+  /// Read-only view of the current flags.
+  Map<String, CullFlag> get flags => UnmodifiableMapView(_flags);
 
   /// Loads a [CullSession] from [folder]/cull_session.json.
   ///
@@ -43,7 +49,7 @@ class CullSession {
         }
         // Unknown values are silently ignored (treated as undecided)
       }
-      return CullSession(flags: flags);
+      return CullSession(flags);
     } catch (_) {
       // Corrupt file or any other error => return empty session
       return CullSession();
@@ -57,7 +63,7 @@ class CullSession {
   Future<void> save(Directory folder) async {
     try {
       final data = <String, String>{};
-      for (final entry in flags.entries) {
+      for (final entry in _flags.entries) {
         if (entry.value == CullFlag.keep) {
           data[entry.key] = 'keep';
         } else if (entry.value == CullFlag.skip) {
@@ -73,17 +79,17 @@ class CullSession {
   }
 
   /// Returns the flag for [stem], defaulting to [CullFlag.undecided].
-  CullFlag flagFor(String stem) => flags[stem] ?? CullFlag.undecided;
+  CullFlag flagFor(String stem) => _flags[stem] ?? CullFlag.undecided;
 
   /// Sets the flag for [stem].
   void setFlag(String stem, CullFlag flag) {
     if (flag == CullFlag.undecided) {
-      flags.remove(stem);
+      _flags.remove(stem);
     } else {
-      flags[stem] = flag;
+      _flags[stem] = flag;
     }
   }
 
   @override
-  String toString() => 'CullSession(${flags.length} flags)';
+  String toString() => 'CullSession(${_flags.length} flags)';
 }

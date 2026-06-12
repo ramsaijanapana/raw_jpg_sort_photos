@@ -75,7 +75,7 @@ void main() {
 
   group('CullSession.save', () {
     test('saves keep and skip flags, omits undecided', () async {
-      final session = CullSession(flags: {
+      final session = CullSession({
         'IMG_001': CullFlag.keep,
         'IMG_002': CullFlag.skip,
         'IMG_003': CullFlag.undecided,
@@ -96,7 +96,7 @@ void main() {
     });
 
     test('saves empty object when all flags undecided', () async {
-      final session = CullSession(flags: {
+      final session = CullSession({
         'A': CullFlag.undecided,
       });
 
@@ -110,7 +110,7 @@ void main() {
     test('save failure is silent (no throw)', () async {
       // Use a directory that doesn't exist -> save should not throw
       final nonExist = Directory(p.join(tmp.path, 'non_existent_dir'));
-      final session = CullSession(flags: {'A': CullFlag.keep});
+      final session = CullSession({'A': CullFlag.keep});
 
       // Should complete without throwing
       await expectLater(session.save(nonExist), completes);
@@ -119,7 +119,7 @@ void main() {
 
   group('Round-trip', () {
     test('save then load produces identical flags', () async {
-      final original = CullSession(flags: {
+      final original = CullSession({
         'photo1': CullFlag.keep,
         'photo2': CullFlag.skip,
         'photo3': CullFlag.keep,
@@ -134,7 +134,7 @@ void main() {
     });
 
     test('format matches Python format: {"stem": "keep"|"skip"}', () async {
-      final session = CullSession(flags: {
+      final session = CullSession({
         'DSC_0001': CullFlag.keep,
         'DSC_0002': CullFlag.skip,
       });
@@ -162,7 +162,7 @@ void main() {
     });
 
     test('setFlag undecided removes the entry', () {
-      final session = CullSession(flags: {'photo1': CullFlag.keep});
+      final session = CullSession({'photo1': CullFlag.keep});
       session.setFlag('photo1', CullFlag.undecided);
       expect(session.flags.containsKey('photo1'), isFalse);
       expect(session.flagFor('photo1'), CullFlag.undecided);

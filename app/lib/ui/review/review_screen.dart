@@ -108,33 +108,24 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
     final size = MediaQuery.sizeOf(context);
     final isWide = size.width >= 720;
 
+    // Keep the filmstrip aligned with the current index regardless of what
+    // triggered the change (keyboard, swipe, tap, or auto-advance).
+    ref.listen(
+      cullControllerProvider.select((s) => s.index),
+      (prev, next) => _scrollFilmstripTo(next),
+    );
+
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       body: _KeyboardHandler(
         focusNode: _shortcutFocus,
-        onNav: (d) {
-          ctrl.nav(d);
-          _scrollFilmstripTo(state.index + d);
-        },
-        onKeep: () async {
-          await ctrl.keep();
-          _scrollFilmstripTo(state.index);
-        },
-        onSkip: () async {
-          await ctrl.skip();
-          _scrollFilmstripTo(state.index);
-        },
+        onNav: ctrl.nav,
+        onKeep: ctrl.keep,
+        onSkip: ctrl.skip,
         onUnflag: () => ctrl.unflag(),
         onToggleMode: () => ctrl.toggleMode(),
-        onFirst: () {
-          ctrl.goto(0);
-          _scrollFilmstripTo(0);
-        },
-        onLast: () {
-          final last = state.pairs.length - 1;
-          ctrl.goto(last);
-          _scrollFilmstripTo(last);
-        },
+        onFirst: () => ctrl.goto(0),
+        onLast: () => ctrl.goto(state.pairs.length - 1),
         child: Column(
           children: [
             // Top bar
@@ -142,13 +133,12 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
               state: state,
               isWide: isWide,
               onOpenFolder: () async {
-                final svc = FilePickService();
+                final svc = ref.read(filePickServiceProvider);
                 final result = await svc.pickDirectory(
                   title: 'Open photo folder',
                 );
                 if (result.path != null) {
                   await ctrl.openFolder(result.path!);
-                  _scrollFilmstripTo(0);
                 }
               },
             ),
@@ -163,10 +153,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
               state: state,
               controller: _filmstripController,
               itemExtent: _itemExtent,
-              onTap: (i) {
-                ctrl.goto(i);
-                _scrollFilmstripTo(i);
-              },
+              onTap: ctrl.goto,
             ),
 
             // Bottom bar
@@ -224,7 +211,6 @@ class _KeyboardHandler extends StatelessWidget {
         const SingleActivator(LogicalKeyboardKey.keyX): onSkip,
         const SingleActivator(LogicalKeyboardKey.keyU): onUnflag,
         const SingleActivator(LogicalKeyboardKey.keyR): onToggleMode,
-        const SingleActivator(LogicalKeyboardKey.tab): onToggleMode,
         const SingleActivator(LogicalKeyboardKey.home): onFirst,
         const SingleActivator(LogicalKeyboardKey.end): onLast,
       },
@@ -270,25 +256,37 @@ class _TopBar extends ConsumerWidget {
           children: [
             // Filename
             if (pair != null) ...[
-              Text(
-                pair.stem,
-                style: theme.textTheme.titleSmall?.copyWith(
-                  fontWeight: FontWeight.bold,
+              Flexible(
+                child: Text(
+                  pair.stem,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
-              const SizedBox(width: 8),
-              _PairChip(hasJpg: pair.jpg != null),
+              // The pair chip is decorative; drop it on narrow widths so the
+              // controls fit.
+              if (isWide) ...[
+                const SizedBox(width: 8),
+                _PairChip(hasJpg: pair.jpg != null),
+              ],
             ] else
-              Text(
-                'No folder open',
-                style: theme.textTheme.titleSmall?.copyWith(
-                  color: cs.onSurfaceVariant,
+              Flexible(
+                child: Text(
+                  'No folder open',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
                 ),
               ),
             const Spacer(),
 
-            // Counter
-            if (state.pairs.isNotEmpty) ...[
+            // Counter (hidden on narrow widths to avoid overflow)
+            if (isWide && state.pairs.isNotEmpty) ...[
               Text(
                 '${state.index + 1} / ${state.pairs.length}',
                 style: theme.textTheme.bodySmall,
@@ -296,7 +294,7 @@ class _TopBar extends ConsumerWidget {
               const SizedBox(width: 12),
             ],
 
-            // Mode toggle
+            // Mode toggle (compact sizing to avoid overflow on narrow screens)
             SegmentedButton<String>(
               segments: const [
                 ButtonSegment(value: 'jpg', label: Text('JPG')),
@@ -306,23 +304,39 @@ class _TopBar extends ConsumerWidget {
               onSelectionChanged: (s) =>
                   ref.read(cullControllerProvider.notifier).setMode(s.first),
               style: SegmentedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                minimumSize: const Size(60, 32),
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(36, 30),
+                maximumSize: const Size(120, 36),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
 
-            // Open folder
-            FilledButton(
-              onPressed: onOpenFolder,
-              style: FilledButton.styleFrom(
-                minimumSize: const Size(100, 34),
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            // Open folder: full button on wide, compact icon on narrow.
+            if (isWide)
+              FilledButton(
+                onPressed: onOpenFolder,
+                style: FilledButton.styleFrom(
+                  minimumSize: const Size(100, 34),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('Open Folder'),
+              )
+            else
+              IconButton.filled(
+                onPressed: onOpenFolder,
+                tooltip: 'Open Folder',
+                iconSize: 20,
+                visualDensity: VisualDensity.compact,
+                style: IconButton.styleFrom(
+                  minimumSize: const Size(36, 36),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: const EdgeInsets.all(4),
+                ),
+                icon: const Icon(Icons.folder_open),
               ),
-              child: const Text('Open Folder'),
-            ),
           ],
         ),
       ),
@@ -361,7 +375,7 @@ class _PairChip extends StatelessWidget {
 // Stage
 // ---------------------------------------------------------------------------
 
-class _Stage extends ConsumerWidget {
+class _Stage extends ConsumerStatefulWidget {
   const _Stage({
     required this.state,
     required this.isWide,
@@ -373,7 +387,43 @@ class _Stage extends ConsumerWidget {
   final CullController ctrl;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_Stage> createState() => _StageState();
+}
+
+class _StageState extends ConsumerState<_Stage> {
+  final _transformController = TransformationController();
+
+  /// Whether the image is effectively un-zoomed; only then should the
+  /// horizontal-swipe navigation gesture be active (otherwise pan-while-zoomed
+  /// would be hijacked as a swipe).
+  bool _atRest = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _transformController.addListener(_onTransform);
+  }
+
+  void _onTransform() {
+    final scale = _transformController.value.getMaxScaleOnAxis();
+    final atRest = scale <= 1.05;
+    if (atRest != _atRest) {
+      setState(() => _atRest = atRest);
+    }
+  }
+
+  @override
+  void dispose() {
+    _transformController.removeListener(_onTransform);
+    _transformController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = widget.state;
+    final isWide = widget.isWide;
+    final ctrl = widget.ctrl;
     final pair = state.currentPair;
     final flag = pair != null
         ? (state.flags[pair.stem] ?? CullFlag.undecided)
@@ -397,6 +447,7 @@ class _Stage extends ConsumerWidget {
                   devicePixelRatio: dpr,
                   isWide: isWide,
                   ctrl: ctrl,
+                  transformController: _transformController,
                 ),
 
                 // Left flag stripe
@@ -425,8 +476,8 @@ class _Stage extends ConsumerWidget {
                     child: _FlagBadge(flag: flag),
                   ),
 
-                // Narrow: swipe and floating buttons
-                if (!isWide && pair != null)
+                // Narrow: swipe (only when un-zoomed) and floating buttons
+                if (!isWide && pair != null && _atRest)
                   Positioned.fill(
                     child: GestureDetector(
                       behavior: HitTestBehavior.translucent,
@@ -530,6 +581,7 @@ class _StageContent extends ConsumerWidget {
     required this.devicePixelRatio,
     required this.isWide,
     required this.ctrl,
+    required this.transformController,
   });
 
   final CullState state;
@@ -537,6 +589,7 @@ class _StageContent extends ConsumerWidget {
   final double devicePixelRatio;
   final bool isWide;
   final CullController ctrl;
+  final TransformationController transformController;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -586,6 +639,7 @@ class _StageContent extends ConsumerWidget {
         final cacheWidth = (stageWidth * devicePixelRatio).round();
 
         return InteractiveViewer(
+          transformationController: transformController,
           maxScale: 8,
           child: Center(
             child: Image.memory(
@@ -778,28 +832,29 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
               ),
             ),
 
-            const Spacer(),
+            const SizedBox(width: 8),
 
-            // Include JPGs checkbox
+            // Include JPGs checkbox (+ label on wide) and export button.
             Checkbox(
               value: _includeJpgs,
               onChanged: (v) => setState(() => _includeJpgs = v ?? true),
               visualDensity: VisualDensity.compact,
             ),
-            Text('Also copy JPGs', style: theme.textTheme.bodySmall),
-            const SizedBox(width: 12),
-
-            // Export button
+            if (widget.isWide) ...[
+              Text('Also copy JPGs', style: theme.textTheme.bodySmall),
+              const SizedBox(width: 12),
+            ],
             FilledButton(
-              onPressed: state.keptCount == 0
-                  ? null
-                  : () => _doExport(context),
+              onPressed: state.keptCount == 0 ? null : () => _doExport(context),
               style: FilledButton.styleFrom(
-                minimumSize: const Size(100, 34),
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(88, 34),
+                padding: const EdgeInsets.symmetric(horizontal: 10),
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: const Text('Export Kept →'),
+              child: Text(
+                widget.isWide ? 'Export Kept →' : 'Export →',
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
@@ -808,7 +863,7 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
   }
 
   Future<void> _doExport(BuildContext context) async {
-    final svc = FilePickService();
+    final svc = ref.read(filePickServiceProvider);
     final result = await svc.pickDirectory(title: 'Export kept photos to…');
 
     if (!context.mounted) return;

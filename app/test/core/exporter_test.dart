@@ -42,7 +42,7 @@ void main() {
   group('exportKept', () {
     test('copies kept RAW files', () async {
       final pair = await makePair(stem: 'DSC_0001', rawExt: '.arw');
-      final session = CullSession(flags: {'DSC_0001': CullFlag.keep});
+      final session = CullSession({'DSC_0001': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -58,7 +58,7 @@ void main() {
 
     test('copies kept RAW and JPG when includeJpgs=true', () async {
       final pair = await makePair(stem: 'DSC_0002', rawExt: '.nef', jpgExt: '.jpg');
-      final session = CullSession(flags: {'DSC_0002': CullFlag.keep});
+      final session = CullSession({'DSC_0002': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -75,7 +75,7 @@ void main() {
 
     test('respects includeJpgs=false: only copies RAW', () async {
       final pair = await makePair(stem: 'DSC_0003', rawExt: '.cr2', jpgExt: '.jpg');
-      final session = CullSession(flags: {'DSC_0003': CullFlag.keep});
+      final session = CullSession({'DSC_0003': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -95,7 +95,7 @@ void main() {
       final pair2 = await makePair(stem: 'DSC_0005', rawExt: '.arw');
       final pair3 = await makePair(stem: 'DSC_0006', rawExt: '.arw');
 
-      final session = CullSession(flags: {
+      final session = CullSession({
         'DSC_0004': CullFlag.keep,
         'DSC_0005': CullFlag.skip,
         // DSC_0006 is undecided
@@ -117,7 +117,7 @@ void main() {
 
     test('skips skip-flagged pairs', () async {
       final pair = await makePair(stem: 'DSC_0007', rawExt: '.nef', jpgExt: '.jpg');
-      final session = CullSession(flags: {'DSC_0007': CullFlag.skip});
+      final session = CullSession({'DSC_0007': CullFlag.skip});
 
       final result = await exportKept(
         source: src,
@@ -148,7 +148,7 @@ void main() {
     test('creates destination directory if needed', () async {
       final newDest = Directory(p.join(dest.path, 'subdir', 'nested'));
       final pair = await makePair(stem: 'DSC_0009', rawExt: '.arw');
-      final session = CullSession(flags: {'DSC_0009': CullFlag.keep});
+      final session = CullSession({'DSC_0009': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -164,7 +164,7 @@ void main() {
 
     test('returned outputPath matches destination', () async {
       final pair = await makePair(stem: 'DSC_0010', rawExt: '.arw');
-      final session = CullSession(flags: {'DSC_0010': CullFlag.keep});
+      final session = CullSession({'DSC_0010': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -182,7 +182,7 @@ void main() {
       // Pre-create file at destination with different content
       await createFile(p.join(dest.path, 'DSC_0011.arw'), 'old_content');
 
-      final session = CullSession(flags: {'DSC_0011': CullFlag.keep});
+      final session = CullSession({'DSC_0011': CullFlag.keep});
       await exportKept(
         source: src,
         destination: dest,
@@ -200,7 +200,7 @@ void main() {
 
     test('handles raw-only pair with includeJpgs=true gracefully', () async {
       final pair = await makePair(stem: 'DSC_0012', rawExt: '.arw'); // no jpg
-      final session = CullSession(flags: {'DSC_0012': CullFlag.keep});
+      final session = CullSession({'DSC_0012': CullFlag.keep});
 
       final result = await exportKept(
         source: src,
@@ -212,6 +212,32 @@ void main() {
 
       // Only RAW copied since jpg is null
       expect(result.copied, 1);
+    });
+
+    test('skips a missing source raw, still copies the rest (P0-7)', () async {
+      // pair1: source RAW exists. pair2: source RAW deleted before export.
+      final pair1 = await makePair(stem: 'GOOD', rawExt: '.arw');
+      final pair2 = await makePair(stem: 'GONE', rawExt: '.arw');
+      // Remove the source for pair2 so its copy must be skipped, not abort all.
+      await pair2.raw.delete();
+
+      final session = CullSession({
+        'GOOD': CullFlag.keep,
+        'GONE': CullFlag.keep,
+      });
+
+      final result = await exportKept(
+        source: src,
+        destination: dest,
+        pairs: [pair2, pair1], // missing one first to prove it doesn't abort
+        session: session,
+        includeJpgs: false,
+      );
+
+      // Only the existing source was copied; count reflects successes only.
+      expect(result.copied, 1);
+      expect(File(p.join(dest.path, 'GOOD.arw')).existsSync(), isTrue);
+      expect(File(p.join(dest.path, 'GONE.arw')).existsSync(), isFalse);
     });
 
     test('empty pairs list returns zero copied', () async {

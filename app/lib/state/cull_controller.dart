@@ -1,9 +1,9 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path/path.dart' as p;
 
 import '../core/cull_session.dart';
 import '../core/exporter.dart';
@@ -71,61 +71,118 @@ class CullState {
 }
 
 // ---------------------------------------------------------------------------
-// LRU cache helper
+// LRU cache helper (byte-budget)
 // ---------------------------------------------------------------------------
 
-class _LruCache<K, V> {
-  _LruCache(this.capacity);
+/// Internal wrapper so a cached `null` (= "no preview available") is a
+/// distinct, remembered value rather than an absent key.
+class LruEntry<V> {
+  const LruEntry(this.value);
+  final V value;
+}
 
-  final int capacity;
-  final LinkedHashMap<K, V> _map = LinkedHashMap();
+/// A least-recently-used cache bounded by a total byte budget.
+///
+/// [sizeOf] reports the byte cost of a stored value; on every [put] the cache
+/// evicts the oldest entries while the running total exceeds [maxBytes].
+/// Storing a value whose own size exceeds [maxBytes] is tolerated: it is kept
+/// (so a subsequent [get] hits) but everything else is evicted.
+class LruCache<K, V> {
+  LruCache(this.maxBytes, this.sizeOf);
 
-  V? get(K key) {
-    final val = _map.remove(key);
-    if (val != null) _map[key] = val;
-    return val;
+  final int maxBytes;
+  final int Function(V value) sizeOf;
+
+  final LinkedHashMap<K, LruEntry<V>> _map = LinkedHashMap();
+  final Map<K, int> _sizes = {};
+  int _totalBytes = 0;
+
+  bool containsKey(K key) => _map.containsKey(key);
+
+  /// Returns the cached entry for [key], or null if absent. Note that a present
+  /// entry may itself wrap a `null` value; check [containsKey] to distinguish.
+  LruEntry<V>? get(K key) {
+    final entry = _map.remove(key);
+    if (entry == null) return null;
+    // Re-insert to mark most-recently-used.
+    _map[key] = entry;
+    return entry;
   }
 
   void put(K key, V value) {
-    _map.remove(key);
-    if (_map.length >= capacity) {
-      _map.remove(_map.keys.first);
+    // Remove any existing entry (and reclaim its bytes) first.
+    if (_map.containsKey(key)) {
+      _map.remove(key);
+      _totalBytes -= _sizes.remove(key) ?? 0;
     }
-    _map[key] = value;
+
+    final size = sizeOf(value);
+    _map[key] = LruEntry<V>(value);
+    _sizes[key] = size;
+    _totalBytes += size;
+
+    _evictToBudget(protect: key);
   }
 
-  bool containsKey(K key) => _map.containsKey(key);
+  void _evictToBudget({required K protect}) {
+    while (_totalBytes > maxBytes && _map.length > 1) {
+      final oldest = _map.keys.first;
+      // Never evict the entry we just inserted, even if it alone is oversized.
+      if (oldest == protect) {
+        // Inserted item is the oldest only when it is the sole/over-budget
+        // entry; nothing else to evict.
+        if (_map.length == 1) break;
+        // Move on to the next-oldest by removing and re-adding protect last.
+        final entry = _map.remove(oldest)!;
+        _map[oldest] = entry;
+        continue;
+      }
+      _map.remove(oldest);
+      _totalBytes -= _sizes.remove(oldest) ?? 0;
+    }
+  }
+
+  int get totalBytes => _totalBytes;
+  int get length => _map.length;
 }
 
-// ---------------------------------------------------------------------------
-// Preview cache provider (module-level singleton via provider)
-// ---------------------------------------------------------------------------
-
-/// Holds a preview LRU keyed by (stem, mode).
-class PreviewCache {
-  final _lru = _LruCache<({String stem, String mode}), Uint8List?>(12);
-}
-
-final previewCacheProvider = Provider<PreviewCache>((_) => PreviewCache());
+/// Byte cost of a possibly-null preview entry. A cached `null` (no preview)
+/// still occupies a small constant so the budget arithmetic stays sane.
+int _previewSizeOf(Uint8List? bytes) => bytes?.lengthInBytes ?? 16;
 
 // ---------------------------------------------------------------------------
-// Preview FutureProvider.family
+// Preview / thumbnail caches (module-level singletons via providers)
 // ---------------------------------------------------------------------------
 
 typedef PreviewKey = ({String stem, String mode});
 
-final previewProvider = FutureProvider.family<Uint8List?, PreviewKey>(
+/// Holds the full-resolution preview LRU keyed by (stem, mode).
+class PreviewCache {
+  final lru = LruCache<PreviewKey, Uint8List?>(32 * 1024 * 1024, _previewSizeOf);
+}
+
+/// Holds the filmstrip thumbnail LRU keyed by stem.
+class ThumbnailCache {
+  final lru = LruCache<String, Uint8List?>(8 * 1024 * 1024, _previewSizeOf);
+}
+
+final previewCacheProvider = Provider<PreviewCache>((_) => PreviewCache());
+final thumbnailCacheProvider = Provider<ThumbnailCache>((_) => ThumbnailCache());
+
+// ---------------------------------------------------------------------------
+// Preview FutureProvider.family (autoDispose — the LRU is the only retention)
+// ---------------------------------------------------------------------------
+
+final previewProvider =
+    FutureProvider.autoDispose.family<Uint8List?, PreviewKey>(
   (ref, key) async {
     final cache = ref.read(previewCacheProvider);
-    if (cache._lru.containsKey(key)) {
-      return cache._lru.get(key);
+    if (cache.lru.containsKey(key)) {
+      return cache.lru.get(key)!.value;
     }
 
-    final ctrl = ref.read(cullControllerProvider);
-    final pair = ctrl.pairs.firstWhere(
-      (p) => p.stem == key.stem,
-      orElse: () => throw StateError('Pair not found: ${key.stem}'),
-    );
+    final pair = _lookupPair(ref, key.stem);
+    if (pair == null) return null;
 
     Uint8List? bytes;
     if (key.mode == 'jpg' && pair.jpg != null) {
@@ -134,46 +191,75 @@ final previewProvider = FutureProvider.family<Uint8List?, PreviewKey>(
       bytes = await extractPreview(pair.raw);
     }
 
-    cache._lru.put(key, bytes);
+    cache.lru.put(key, bytes);
     return bytes;
   },
 );
 
 // ---------------------------------------------------------------------------
-// Thumbnail FutureProvider.family
+// Thumbnail FutureProvider.family (autoDispose + own LRU)
 // ---------------------------------------------------------------------------
 
-final thumbnailProvider = FutureProvider.family<Uint8List?, String>(
+final thumbnailProvider =
+    FutureProvider.autoDispose.family<Uint8List?, String>(
   (ref, stem) async {
-    final ctrl = ref.read(cullControllerProvider);
-    final pair = ctrl.pairs.firstWhere(
-      (p) => p.stem == stem,
-      orElse: () => throw StateError('Pair not found: $stem'),
-    );
-
-    if (pair.jpg != null) {
-      return pair.jpg!.readAsBytes();
+    final cache = ref.read(thumbnailCacheProvider);
+    if (cache.lru.containsKey(stem)) {
+      return cache.lru.get(stem)!.value;
     }
-    return extractPreview(pair.raw);
+
+    final pair = _lookupPair(ref, stem);
+    if (pair == null) return null;
+
+    Uint8List? bytes;
+    if (pair.jpg != null) {
+      bytes = await pair.jpg!.readAsBytes();
+    } else {
+      bytes = await extractPreview(pair.raw);
+    }
+
+    cache.lru.put(stem, bytes);
+    return bytes;
   },
 );
+
+/// Null-safe lookup of the current pair by stem. Returns null (rather than
+/// throwing) when the stem is no longer present — e.g. during a folder switch.
+PhotoPair? _lookupPair(Ref ref, String stem) {
+  final pairs = ref.read(cullControllerProvider).pairs;
+  for (final p in pairs) {
+    if (p.stem == stem) return p;
+  }
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // CullController Notifier
 // ---------------------------------------------------------------------------
 
 class CullController extends Notifier<CullState> {
+  Timer? _advanceTimer;
+  int _openGeneration = 0;
+
   @override
-  CullState build() => const CullState();
+  CullState build() {
+    ref.onDispose(() => _advanceTimer?.cancel());
+    return const CullState();
+  }
 
   Future<void> openFolder(String path) async {
+    _advanceTimer?.cancel();
+    final gen = ++_openGeneration;
+
     state = state.copyWith(loading: true, error: null);
 
     try {
       final dir = Directory(path);
       final pairs = await scanPairs(dir);
+      if (gen != _openGeneration) return;
       pairs.sort((a, b) => a.stem.compareTo(b.stem));
       final session = await CullSession.load(dir);
+      if (gen != _openGeneration) return;
 
       state = state.copyWith(
         dir: dir,
@@ -186,6 +272,7 @@ class CullController extends Notifier<CullState> {
 
       _preloadNeighbors(0);
     } catch (e) {
+      if (gen != _openGeneration) return;
       state = state.copyWith(
         loading: false,
         error: 'Failed to open folder: $e',
@@ -194,6 +281,8 @@ class CullController extends Notifier<CullState> {
   }
 
   void goto(int index) {
+    _advanceTimer?.cancel();
+    if (state.pairs.isEmpty) return;
     final clamped = index.clamp(0, state.pairs.length - 1);
     state = state.copyWith(index: clamped);
     _preloadNeighbors(clamped);
@@ -202,11 +291,13 @@ class CullController extends Notifier<CullState> {
   void nav(int delta) => goto(state.index + delta);
 
   Future<void> keep() async {
+    _advanceTimer?.cancel();
     await _setFlag(CullFlag.keep);
     _autoAdvance();
   }
 
   Future<void> skip() async {
+    _advanceTimer?.cancel();
     await _setFlag(CullFlag.skip);
     _autoAdvance();
   }
@@ -267,12 +358,14 @@ class CullController extends Notifier<CullState> {
   }
 
   CullSession _buildSession() {
-    return CullSession(flags: Map<String, CullFlag>.from(state.flags));
+    return CullSession(state.flags);
   }
 
   void _autoAdvance() {
-    // Advance to next undecided after 120 ms.
-    Future.delayed(const Duration(milliseconds: 120), () {
+    // Advance to next undecided after 120 ms. Any earlier scheduled timer was
+    // cancelled by the caller, so only one advance fires per burst of input.
+    _advanceTimer?.cancel();
+    _advanceTimer = Timer(const Duration(milliseconds: 120), () {
       final s = state;
       if (s.pairs.isEmpty) return;
 
@@ -305,9 +398,3 @@ class CullController extends Notifier<CullState> {
 
 final cullControllerProvider =
     NotifierProvider<CullController, CullState>(CullController.new);
-
-// ---------------------------------------------------------------------------
-// Derived: per-folder path of the stem relative to directory
-// ---------------------------------------------------------------------------
-
-String stemBasename(String fullStemPath) => p.basename(fullStemPath);

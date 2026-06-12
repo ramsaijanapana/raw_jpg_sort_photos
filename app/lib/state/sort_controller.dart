@@ -58,13 +58,13 @@ class SortUiState {
 // ---------------------------------------------------------------------------
 
 class SortController extends Notifier<SortUiState> {
-  final _filePick = FilePickService();
-
   @override
   SortUiState build() => const SortUiState();
 
   Future<void> pickInput() async {
-    final result = await _filePick.pickDirectory(title: 'Choose photo folder');
+    final result = await ref
+        .read(filePickServiceProvider)
+        .pickDirectory(title: 'Choose photo folder');
     if (result.warning != null) {
       state = state.copyWith(
         phase: SortPhase.error,
@@ -85,7 +85,9 @@ class SortController extends Notifier<SortUiState> {
   }
 
   Future<void> pickOutput() async {
-    final result = await _filePick.pickDirectory(title: 'Choose output folder');
+    final result = await ref
+        .read(filePickServiceProvider)
+        .pickDirectory(title: 'Choose output folder');
     if (result.warning != null) {
       state = state.copyWith(
         phase: SortPhase.error,

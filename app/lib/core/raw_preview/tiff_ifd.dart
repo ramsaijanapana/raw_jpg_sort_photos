@@ -1,5 +1,8 @@
 import 'dart:typed_data';
 
+/// A candidate JPEG byte range within a TIFF-based file.
+typedef PreviewRange = ({int offset, int length});
+
 /// Attempts to extract an embedded JPEG preview from TIFF-based RAW files.
 ///
 /// Handles:
@@ -22,10 +25,26 @@ Uint8List? extractTiffPreview(Uint8List bytes) {
   }
 }
 
-Uint8List? _extractTiffPreview(Uint8List bytes) {
-  if (bytes.length < 8) return null;
+/// Parses the TIFF IFD structure in [header] and returns candidate JPEG
+/// (offset, length) ranges, sorted largest-length first.
+///
+/// [header] may be a truncated prefix of the full file; the IFD metadata
+/// generally lives near the start, so the candidate ranges can reference
+/// offsets/lengths that extend beyond [header]. Callers are responsible for
+/// validating the ranges against the real file length and reading the bytes.
+///
+/// Never throws — returns an empty list on any error.
+List<PreviewRange> findTiffPreviewRanges(Uint8List header) {
+  try {
+    return _findTiffPreviewRanges(header);
+  } catch (_) {
+    return const [];
+  }
+}
 
-  // Determine byte order from first two bytes
+List<PreviewRange> _findTiffPreviewRanges(Uint8List bytes) {
+  if (bytes.length < 8) return const [];
+
   final b0 = bytes[0];
   final b1 = bytes[1];
   bool littleEndian;
@@ -34,26 +53,38 @@ Uint8List? _extractTiffPreview(Uint8List bytes) {
   } else if (b0 == 0x4D && b1 == 0x4D) {
     littleEndian = false; // 'MM'
   } else {
-    return null; // Not a TIFF
+    return const []; // Not a TIFF
   }
 
-  // Magic check: accept 42 (standard), 0x4F52, 0x5352 (ORF), 0x55 (RW2), 0x004F (ORF alt)
-  // We read the magic but accept any value for flexibility with camera variants.
-  // (ORF uses 0x4F52/0x5352, RW2 uses 0x55 — all handled by walking the IFD.)
   _readU16(bytes, 2, littleEndian); // magic — validated implicitly
-
-  // IFD0 offset
-  if (bytes.length < 8) return null;
   final ifd0Offset = _readU32(bytes, 4, littleEndian);
 
-  final candidates = <Uint8List>[];
+  final ranges = <PreviewRange>[];
   final visited = <int>{};
+  _walkIfdChain(bytes, ifd0Offset, littleEndian, ranges, visited, depth: 0);
 
-  _walkIfdChain(bytes, ifd0Offset, littleEndian, candidates, visited, depth: 0);
+  // Largest declared length first.
+  ranges.sort((a, b) => b.length.compareTo(a.length));
+  return ranges;
+}
+
+Uint8List? _extractTiffPreview(Uint8List bytes) {
+  final ranges = _findTiffPreviewRanges(bytes);
+  if (ranges.isEmpty) return null;
+
+  final candidates = <Uint8List>[];
+  for (final range in ranges) {
+    final slice = _safeSlice(bytes, range.offset, range.offset + range.length);
+    if (slice == null) continue;
+    final trimmed = _trimToJpeg(slice);
+    if (trimmed != null) {
+      candidates.add(trimmed);
+    } else if (_isValidJpeg(slice)) {
+      candidates.add(slice);
+    }
+  }
 
   if (candidates.isEmpty) return null;
-
-  // Return the largest valid JPEG
   candidates.sort((a, b) => b.length.compareTo(a.length));
   return candidates.first;
 }
@@ -62,24 +93,24 @@ void _walkIfdChain(
   Uint8List bytes,
   int offset,
   bool le,
-  List<Uint8List> candidates,
+  List<PreviewRange> ranges,
   Set<int> visited, {
   required int depth,
 }) {
   if (depth > 8) return; // Guard against infinite loops
   while (offset != 0 && !visited.contains(offset)) {
     visited.add(offset);
-    offset = _walkIfd(bytes, offset, le, candidates, visited, depth: depth);
+    offset = _walkIfd(bytes, offset, le, ranges, visited, depth: depth);
     depth++;
   }
 }
 
-/// Walks one IFD, collects candidates, and returns the next-IFD offset.
+/// Walks one IFD, collects candidate ranges, and returns the next-IFD offset.
 int _walkIfd(
   Uint8List bytes,
   int offset,
   bool le,
-  List<Uint8List> candidates,
+  List<PreviewRange> ranges,
   Set<int> visited, {
   required int depth,
 }) {
@@ -124,30 +155,23 @@ int _walkIfd(
         jpegLength = _readTagValue(bytes, type, count, valueOrOffset, le);
         break;
       case 0x014A: // SubIFD(s)
-        _processSubIfd(bytes, type, count, valueOrOffset, le, candidates, visited, depth: depth + 1);
+        _processSubIfd(bytes, type, count, valueOrOffset, le, ranges, visited, depth: depth + 1);
         break;
     }
   }
 
-  // Collect JPEG interchange format candidate
+  // JPEG interchange format candidate
   if (jpegOffset > 0 && jpegLength > 0) {
-    final slice = _safeSlice(bytes, jpegOffset, jpegOffset + jpegLength);
-    final trimmed = slice == null ? null : _trimToJpeg(slice);
-    if (trimmed != null) {
-      candidates.add(trimmed);
-    }
+    ranges.add((offset: jpegOffset, length: jpegLength));
   } else if (jpegOffset > 0) {
-    // No length given — scan for the JPEG from offset
-    final slice = _scanJpegFrom(bytes, jpegOffset);
-    if (slice != null) candidates.add(slice);
+    // No length given — scan for the JPEG end from offset (header buffer only).
+    final scanned = _scanJpegRangeFrom(bytes, jpegOffset);
+    if (scanned != null) ranges.add(scanned);
   }
 
-  // Collect strip-based JPEG (JPEG-compressed strip)
+  // Strip-based JPEG (JPEG-compressed strip)
   if (stripOffset > 0 && stripByteCount > 0 && (compression == 6 || compression == 7)) {
-    final slice = _safeSlice(bytes, stripOffset, stripOffset + stripByteCount);
-    if (slice != null && _isValidJpeg(slice)) {
-      candidates.add(slice);
-    }
+    ranges.add((offset: stripOffset, length: stripByteCount));
   }
 
   // Return next-IFD offset
@@ -161,7 +185,7 @@ void _processSubIfd(
   int count,
   int valueOrOffset,
   bool le,
-  List<Uint8List> candidates,
+  List<PreviewRange> ranges,
   Set<int> visited, {
   required int depth,
 }) {
@@ -171,7 +195,7 @@ void _processSubIfd(
   if (count == 1) {
     final subOffset = _readU32(bytes, valueOrOffset, le);
     if (subOffset > 0) {
-      _walkIfdChain(bytes, subOffset, le, candidates, visited, depth: depth);
+      _walkIfdChain(bytes, subOffset, le, ranges, visited, depth: depth);
     }
   } else {
     // Multiple SubIFDs: valueOrOffset is a pointer to array of offsets
@@ -181,7 +205,7 @@ void _processSubIfd(
       if (pos + 4 > bytes.length) break;
       final subOffset = _readU32(bytes, pos, le);
       if (subOffset > 0) {
-        _walkIfdChain(bytes, subOffset, le, candidates, visited, depth: depth);
+        _walkIfdChain(bytes, subOffset, le, ranges, visited, depth: depth);
       }
     }
   }
@@ -241,16 +265,15 @@ Uint8List? _trimToJpeg(Uint8List slice) {
   return null;
 }
 
-/// Scans forward from [offset] looking for a JPEG stream (FFD8) and its EOI.
-Uint8List? _scanJpegFrom(Uint8List bytes, int offset) {
+/// Scans forward from [offset] looking for a JPEG stream (FFD8) and its EOI,
+/// returning the (offset, length) range, or null.
+PreviewRange? _scanJpegRangeFrom(Uint8List bytes, int offset) {
   if (offset < 0 || offset + 2 > bytes.length) return null;
   if (bytes[offset] != 0xFF || bytes[offset + 1] != 0xD8) return null;
 
-  // Find EOI
   for (int i = offset + 2; i < bytes.length - 1; i++) {
     if (bytes[i] == 0xFF && bytes[i + 1] == 0xD9) {
-      final slice = Uint8List.sublistView(bytes, offset, i + 2);
-      if (_isValidJpeg(slice)) return slice;
+      return (offset: offset, length: i + 2 - offset);
     }
   }
   return null;

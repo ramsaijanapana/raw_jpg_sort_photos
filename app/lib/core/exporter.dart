@@ -25,16 +25,20 @@ Future<ExportResult> exportKept({
   for (final pair in pairs) {
     if (session.flagFor(pair.stem) != CullFlag.keep) continue;
 
-    // Copy RAW file
-    final rawDest = File(p.join(destination.path, p.basename(pair.raw.path)));
-    await pair.raw.copy(rawDest.path);
-    copied++;
-
-    // Copy JPG if requested and available
-    if (includeJpgs && pair.jpg != null) {
-      final jpgDest = File(p.join(destination.path, p.basename(pair.jpg!.path)));
-      await pair.jpg!.copy(jpgDest.path);
+    // Copy RAW file — skip silently if it no longer exists on disk.
+    if (await pair.raw.exists()) {
+      final rawDest = File(p.join(destination.path, p.basename(pair.raw.path)));
+      await pair.raw.copy(rawDest.path);
       copied++;
+    }
+
+    // Copy JPG if requested and available — skip silently if missing.
+    if (includeJpgs && pair.jpg != null) {
+      if (await pair.jpg!.exists()) {
+        final jpgDest = File(p.join(destination.path, p.basename(pair.jpg!.path)));
+        await pair.jpg!.copy(jpgDest.path);
+        copied++;
+      }
     }
   }
 

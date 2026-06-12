@@ -159,6 +159,43 @@ void main() {
     );
   });
 
+  // 5b. Narrow review top bar must not overflow at 360px logical width.
+  testWidgets('review top bar fits at 360px with a folder open (P1-1)',
+      (tester) async {
+    final tmp = Directory.systemTemp.createTempSync('narrow_topbar_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    // A long stem to stress the filename Text in the top bar.
+    for (final name in [
+      'A_VERY_LONG_FILENAME_THAT_COULD_OVERFLOW_001.ARW',
+      'A_VERY_LONG_FILENAME_THAT_COULD_OVERFLOW_002.ARW',
+    ]) {
+      File(p.join(tmp.path, name)).writeAsBytesSync([0, 1, 2, 3]);
+    }
+
+    tester.view.physicalSize =
+        const Size(360, 700) * tester.view.devicePixelRatio;
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const PhotoSorterApp(),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.tap(find.text('Review').last);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(
+      () => container.read(cullControllerProvider.notifier).openFolder(tmp.path),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    // No RenderFlex overflow (or any other) exception should have been thrown.
+    expect(tester.takeException(), isNull);
+  });
+
   // 6. End-to-end-ish: openFolder, keep/skip, session written.
   test('cull_controller: openFolder, keep, skip, session file written',
       () async {
