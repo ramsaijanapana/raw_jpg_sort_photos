@@ -332,6 +332,9 @@ class CullController extends Notifier<CullState> {
   /// back to the affected photo. No-op when the stack is empty.
   Future<void> undo() async {
     if (_undoStack.isEmpty) return;
+    // A pending auto-advance from the flag being undone must not fire after
+    // the undo navigates back.
+    _advanceTimer?.cancel();
     final entry = _undoStack.removeLast();
 
     final newFlags = Map<String, CullFlag>.from(state.flags);

@@ -76,6 +76,10 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   // Key to reach _StageState for zoom toggle from keyboard
   final _stageKey = GlobalKey<_StageState>();
 
+  // The stage reports its actual decode cacheWidth here so the neighbor
+  // precache uses the IDENTICAL ResizeImage key (window width != stage width).
+  final ValueNotifier<int?> _stageCacheWidth = ValueNotifier(null);
+
   bool _showExif = true;
 
   @override
@@ -110,6 +114,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
 
   @override
   void dispose() {
+    _stageCacheWidth.dispose();
     _shortcutFocus.dispose();
     _filmstripController.dispose();
     super.dispose();
@@ -170,7 +175,8 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
         // Capture context-dependent values before entering async code.
         final size = MediaQuery.sizeOf(context);
         final dpr = MediaQuery.devicePixelRatioOf(context);
-        final cw = (size.width * dpr).round();
+        // Must match the stage's decode width exactly or the precache misses.
+        final cw = _stageCacheWidth.value ?? (size.width * dpr).round();
         for (final offset in [1, 2, -1]) {
           final ni = next + offset;
           if (ni < 0 || ni >= pairs.length) continue;
@@ -229,6 +235,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
                   ctrl: ctrl,
                   onOpenFolder: doOpenFolder,
                   showExif: _showExif,
+                  cacheWidthSink: _stageCacheWidth,
                 ),
               ),
 
@@ -591,6 +598,7 @@ class _Stage extends ConsumerStatefulWidget {
     required this.ctrl,
     required this.onOpenFolder,
     this.showExif = true,
+    this.cacheWidthSink,
   });
 
   final CullState state;
@@ -598,6 +606,10 @@ class _Stage extends ConsumerStatefulWidget {
   final CullController ctrl;
   final VoidCallback onOpenFolder;
   final bool showExif;
+
+  /// Reports the decode cacheWidth actually used by the stage so callers can
+  /// precache with an identical ResizeImage key.
+  final ValueNotifier<int?>? cacheWidthSink;
 
   @override
   ConsumerState<_Stage> createState() => _StageState();
@@ -666,6 +678,7 @@ class _StageState extends ConsumerState<_Stage>
     _animation = null;
     _transformController.value = Matrix4.identity();
     _nativeImageSize = null;
+    _sizeResolvedFor = null;
   }
 
   /// Toggle between fit and 100% zoom, optionally centered on [focalPoint]
@@ -700,8 +713,11 @@ class _StageState extends ConsumerState<_Stage>
     final fitScaleY = stageSize.height / nativeSize.height;
     final fitScale = fitScaleX < fitScaleY ? fitScaleX : fitScaleY;
 
-    // Target: 1 image px = 1 device px → widget scale = dpr / fitScale.
-    final targetScale = dpr / fitScale;
+    // The image is displayed at fitScale logical px per image px, i.e.
+    // fitScale * dpr device px per image px. For 1 image px = 1 device px the
+    // widget transform must contribute the remaining factor.
+    final targetScale = (1 / (fitScale * dpr)).clamp(1.0, 8.0);
+    if (targetScale <= 1.05) return; // already at/above 100% in fit view
 
     // Center of the stage in widget coords.
     final stageCenter = Offset(stageSize.width / 2, stageSize.height / 2);
@@ -733,19 +749,27 @@ class _StageState extends ConsumerState<_Stage>
     _animController.forward(from: 0);
   }
 
-  /// Called when a new image provider is resolved; stores the native image size.
-  void _resolveImageSize(ImageProvider provider) {
-    final stream = provider.resolve(ImageConfiguration.empty);
-    stream.addListener(ImageStreamListener((info, _) {
-      if (mounted) {
-        setState(() {
-          _nativeImageSize = Size(
-            info.image.width.toDouble(),
-            info.image.height.toDouble(),
-          );
-        });
+  /// Resolves the TRUE native size of the image from its encoded bytes via
+  /// ImageDescriptor (header parse only — no full decode, no stream listener).
+  /// Resolving from the ResizeImage-bounded provider would report the
+  /// downsampled decode size and break the 100% zoom math.
+  Uint8List? _sizeResolvedFor;
+  Future<void> _resolveImageSize(Uint8List bytes) async {
+    if (identical(_sizeResolvedFor, bytes)) return;
+    _sizeResolvedFor = bytes;
+    try {
+      final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
+      final descriptor = await ui.ImageDescriptor.encoded(buffer);
+      final size =
+          Size(descriptor.width.toDouble(), descriptor.height.toDouble());
+      descriptor.dispose();
+      buffer.dispose();
+      if (mounted && identical(_sizeResolvedFor, bytes)) {
+        setState(() => _nativeImageSize = size);
       }
-    }, onError: (dynamic err, StackTrace? st) {}));
+    } catch (_) {
+      // Size stays unknown; zoom falls back to 2x.
+    }
   }
 
   @override
@@ -762,6 +786,7 @@ class _StageState extends ConsumerState<_Stage>
       builder: (context, constraints) {
         final stageW = constraints.maxWidth;
         final dpr = MediaQuery.devicePixelRatioOf(context);
+        widget.cacheWidthSink?.value = (stageW * dpr).round();
 
         return Container(
           color: Theme.of(context).colorScheme.surfaceContainerLowest,
@@ -993,7 +1018,7 @@ class _StageContent extends ConsumerStatefulWidget {
   final bool atRest;
   final void Function(Offset) onDoubleTapDown;
   final VoidCallback onDoubleTap;
-  final void Function(ImageProvider) onImageResolved;
+  final void Function(Uint8List) onImageResolved;
   final VoidCallback onOpenFolder;
   final bool showExif;
 
@@ -1079,7 +1104,7 @@ class _StageContentState extends ConsumerState<_StageContent> {
         // Resolve native image size once for zoom calculations.
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            widget.onImageResolved(stageProvider(bytes, cacheWidth));
+            widget.onImageResolved(bytes);
           }
         });
 

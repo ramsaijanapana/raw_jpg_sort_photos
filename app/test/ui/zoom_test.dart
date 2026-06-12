@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -127,5 +128,92 @@ void main() {
 
     // After index change, transform should be reset to identity.
     expect(tc.value.getMaxScaleOnAxis(), closeTo(1.0, 0.01));
+  });
+
+  // Regression: zoom-to-100% must compute the REAL scale from the image's
+  // native size on a 1x-DPI display (it was inert: native size was read from
+  // the downsampled provider and the scale formula was inverted).
+  testWidgets('zoom: Space reaches true 100% scale on a 1x display',
+      (tester) async {
+    final tmp = Directory.systemTemp.createTempSync('zoom100_test_');
+    addTearDown(() => tmp.deleteSync(recursive: true));
+
+    // Generate a real 2400x1600 image and store it as the pair's JPG.
+    final bigImageBytes = await tester.runAsync(() async {
+      final rec = ui.PictureRecorder();
+      final canvas = Canvas(rec);
+      canvas.drawRect(
+        const Rect.fromLTWH(0, 0, 2400, 1600),
+        Paint()..color = const Color(0xFF3D7A5F),
+      );
+      final img = await rec.endRecording().toImage(2400, 1600);
+      final bd = await img.toByteData(format: ui.ImageByteFormat.png);
+      return bd!.buffer.asUint8List();
+    });
+    File(p.join(tmp.path, 'Z001.ARW')).writeAsBytesSync([0, 1, 2, 3]);
+    File(p.join(tmp.path, 'Z001.jpg')).writeAsBytesSync(bigImageBytes!);
+
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1100, 760);
+    addTearDown(() {
+      // ignore: invalid_use_of_visible_for_testing_member
+      tester.view.resetDevicePixelRatio();
+    });
+
+    final container = await makeContainer();
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const PhotoSorterApp(),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('Review').last);
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(() async {
+      await container
+          .read(cullControllerProvider.notifier)
+          .openFolder(tmp.path);
+      final s = container.read(cullControllerProvider);
+      final key = (stem: s.currentPair!.stem, mode: s.mode);
+      await container.read(previewProvider(key).future);
+    });
+    for (var i = 0; i < 5; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    // Let the ImageDescriptor-based native-size resolution complete.
+    await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 200)));
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final iv = tester.widget<InteractiveViewer>(find.byType(InteractiveViewer));
+    final tc = iv.transformationController!;
+    expect(tc.value.getMaxScaleOnAxis(), closeTo(1.0, 0.01));
+
+    // Space = zoom to 100%.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    // Let the 150ms zoom animation finish.
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 200));
+
+    final stageSize = tester.getSize(find.byType(InteractiveViewer));
+    final fitScale = [
+      stageSize.width / 2400,
+      stageSize.height / 1600,
+    ].reduce((a, b) => a < b ? a : b);
+    final expected = (1 / fitScale).clamp(1.0, 8.0);
+
+    final actual = tc.value.getMaxScaleOnAxis();
+    // Must be the computed 100% scale (not the old inert ~1.0, not the 2x
+    // unknown-size fallback).
+    expect(actual, closeTo(expected, expected * 0.15));
+    expect(actual, greaterThan(1.5));
+
+    // Space again returns to fit.
+    await tester.sendKeyEvent(LogicalKeyboardKey.space);
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tc.value.getMaxScaleOnAxis(), closeTo(1.0, 0.05));
   });
 }

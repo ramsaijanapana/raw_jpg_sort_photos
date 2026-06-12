@@ -276,11 +276,15 @@ String _formatExposureTime(int num, int den) {
     }
     return '${secs.toStringAsFixed(1)}s';
   }
-  // < 1 second: simplify fraction
+  // < 1 second: prefer the photographic 1/x form; fall back to decimal
+  // seconds for odd fractions (2/3s as "1/1s" would be wrong).
   final g = _gcd(num, den);
   final n = num ~/ g;
   final d = den ~/ g;
-  return '1/${d ~/ n}s';
+  if (n == 1) return '1/${d}s';
+  final secs = num / den;
+  if (secs >= 0.25) return '${secs.toStringAsFixed(1)}s';
+  return '1/${(den / num).round()}s';
 }
 
 String _formatFNumber(int num, int den) {
