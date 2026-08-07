@@ -76,13 +76,21 @@ Future<Map<String, File>> _indexCompanionJpgs(Directory directory) async {
 
     final stem = p.basenameWithoutExtension(entity.path);
     final existing = jpgsByStem[stem];
-    if (existing == null || _compareJpgCandidates(entity, existing) < 0) {
-      jpgsByStem[stem] = entity;
-    }
+    jpgsByStem[stem] = existing == null
+        ? entity
+        : selectPreferredCompanionJpg(existing, entity);
   }
 
   return jpgsByStem;
 }
+
+/// Selects the deterministic winner between two companion JPG candidates.
+///
+/// This core selection rule is independent of filesystem enumeration order:
+/// the `.jpg` extension family wins over `.jpeg`, then exact basenames use
+/// code-unit ordering.
+File selectPreferredCompanionJpg(File first, File second) =>
+    _compareJpgCandidates(first, second) <= 0 ? first : second;
 
 int _jpgExtensionRank(String path) =>
     p.extension(path).toLowerCase() == '.jpg' ? 0 : 1;

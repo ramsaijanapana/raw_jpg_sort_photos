@@ -8,7 +8,13 @@ void main() {
   late Directory tmp;
 
   setUp(() async {
-    tmp = await Directory.systemTemp.createTemp('scanner_test_');
+    final configuredTempRoot =
+        Platform.environment['PHOTO_SORTER_TEST_TEMP_ROOT'];
+    final tempRoot = configuredTempRoot == null
+        ? Directory.systemTemp
+        : Directory(configuredTempRoot);
+    await tempRoot.create(recursive: true);
+    tmp = await tempRoot.createTemp('scanner_test_');
   });
 
   tearDown(() async {
@@ -84,6 +90,30 @@ void main() {
 
       final raws = await scanRaws(tmp);
       expect(raws.length, exts.length);
+    });
+  });
+
+  group('selectPreferredCompanionJpg', () {
+    test('uses code-unit basename order for both argument permutations', () {
+      final uppercase = File(p.join(tmp.path, 'IMG_007.JPG'));
+      final lowercase = File(p.join(tmp.path, 'IMG_007.jpg'));
+
+      expect(
+        selectPreferredCompanionJpg(lowercase, uppercase).path,
+        uppercase.path,
+      );
+      expect(
+        selectPreferredCompanionJpg(uppercase, lowercase).path,
+        uppercase.path,
+      );
+    });
+
+    test('prefers jpg over jpeg for both argument permutations', () {
+      final jpg = File(p.join(tmp.path, 'IMG_008.jpg'));
+      final jpeg = File(p.join(tmp.path, 'IMG_008.JPEG'));
+
+      expect(selectPreferredCompanionJpg(jpeg, jpg).path, jpg.path);
+      expect(selectPreferredCompanionJpg(jpg, jpeg).path, jpg.path);
     });
   });
 
@@ -180,26 +210,50 @@ void main() {
     });
 
     test(
-      'same-family candidates use code-unit basename order',
+      'same-family candidates use code-unit basename order regardless of creation order',
       () async {
-        await createFile(p.join(tmp.path, 'IMG_007.arw'));
-        await createFile(p.join(tmp.path, 'IMG_007.JPG'));
-        await createFile(p.join(tmp.path, 'IMG_007.jpg'));
+        final rootsByCreationOrder = <String, List<String>>{
+          'lowercase-first': ['IMG_007.jpg', 'IMG_007.JPG'],
+          'uppercase-first': ['IMG_007.JPG', 'IMG_007.jpg'],
+        };
+        final roots = <Directory>[];
 
-        final candidateNames = await tmp
-            .list(recursive: false)
-            .where((entity) => entity is File)
-            .map((entity) => p.basename(entity.path))
-            .where((name) => name.toLowerCase() == 'img_007.jpg')
-            .toList();
-        if (candidateNames.length != 2) {
+        for (final entry in rootsByCreationOrder.entries) {
+          final root = Directory(p.join(tmp.path, entry.key));
+          await root.create();
+          await createFile(p.join(root.path, 'IMG_007.arw'));
+          for (final candidateName in entry.value) {
+            await createFile(p.join(root.path, candidateName));
+          }
+          roots.add(root);
+        }
+
+        final retainedBothNames = await Future.wait(
+          roots.map((root) async {
+            final candidateNames = await root
+                .list(recursive: false)
+                .where((entity) => entity is File)
+                .map((entity) => p.basename(entity.path))
+                .where((name) => name.toLowerCase() == 'img_007.jpg')
+                .toSet();
+            return candidateNames.length == 2 &&
+                candidateNames.containsAll(['IMG_007.JPG', 'IMG_007.jpg']);
+          }),
+        );
+        if (retainedBothNames.any((retainedBoth) => !retainedBoth)) {
           markTestSkipped('Requires a case-sensitive filesystem.');
           return;
         }
 
-        final pairs = await scanPairs(tmp);
+        for (final root in roots) {
+          final pairs = await scanPairs(root);
 
-        expect(p.basename(pairs.single.jpg!.path), 'IMG_007.JPG');
+          expect(
+            p.basename(pairs.single.jpg!.path),
+            'IMG_007.JPG',
+            reason: 'Selection must not depend on directory insertion order.',
+          );
+        }
       },
     );
 
