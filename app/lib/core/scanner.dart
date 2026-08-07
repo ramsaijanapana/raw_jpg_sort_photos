@@ -40,7 +40,9 @@ Future<List<File>> scanRaws(Directory folder) async {
 /// 1. [folder] itself
 /// 2. [folder/JPG/] subdirectory
 ///
-/// Extensions tried (case-sensitive): .jpg, .JPG, .jpeg, .JPEG
+/// Matching is case-sensitive for stems and case-insensitive for extensions.
+/// Root-folder candidates win over `JPG/` candidates. Within one directory,
+/// `.jpg` candidates win over `.jpeg`, then names use code-unit ordering.
 Future<List<PhotoPair>> scanPairs(Directory folder) async {
   final raws = await scanRaws(folder);
   final jpgSub = Directory(p.join(folder.path, 'JPG'));
@@ -48,21 +50,45 @@ Future<List<PhotoPair>> scanPairs(Directory folder) async {
   final pairs = <PhotoPair>[];
   for (final rawFile in raws) {
     final stem = p.basenameWithoutExtension(rawFile.path);
-    File? foundJpg;
-
-    outer:
-    for (final ext in const ['.jpg', '.JPG', '.jpeg', '.JPEG']) {
-      for (final dir in [folder, jpgSub]) {
-        final candidate = File(p.join(dir.path, '$stem$ext'));
-        if (await candidate.exists()) {
-          foundJpg = candidate;
-          break outer;
-        }
-      }
-    }
+    final foundJpg = await _findCompanionJpg(stem, [folder, jpgSub]);
 
     pairs.add(PhotoPair(stem: stem, raw: rawFile, jpg: foundJpg));
   }
 
   return pairs;
 }
+
+Future<File?> _findCompanionJpg(
+  String stem,
+  List<Directory> directories,
+) async {
+  for (final directory in directories) {
+    if (!await directory.exists()) continue;
+
+    final candidates = <File>[];
+    await for (final entity in directory.list(recursive: false)) {
+      if (entity is! File) continue;
+
+      final extension = p.extension(entity.path).toLowerCase();
+      if ((extension == '.jpg' || extension == '.jpeg') &&
+          p.basenameWithoutExtension(entity.path) == stem) {
+        candidates.add(entity);
+      }
+    }
+
+    candidates.sort((a, b) {
+      final extensionComparison = _jpgExtensionRank(
+        a.path,
+      ).compareTo(_jpgExtensionRank(b.path));
+      return extensionComparison != 0
+          ? extensionComparison
+          : p.basename(a.path).compareTo(p.basename(b.path));
+    });
+    if (candidates.isNotEmpty) return candidates.first;
+  }
+
+  return null;
+}
+
+int _jpgExtensionRank(String path) =>
+    p.extension(path).toLowerCase() == '.jpg' ? 0 : 1;

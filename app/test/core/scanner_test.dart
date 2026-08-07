@@ -147,6 +147,29 @@ void main() {
       expect(pairs[0].jpg, isNotNull);
     });
 
+    test('prefers a root JPG over a JPG subdirectory match', () async {
+      await createFile(p.join(tmp.path, 'IMG_004.arw'));
+      await createFile(p.join(tmp.path, 'IMG_004.JPEG'));
+      await createFile(p.join(tmp.path, 'JPG', 'IMG_004.jpg'));
+
+      final pairs = await scanPairs(tmp);
+
+      expect(p.basename(pairs.single.jpg!.path), 'IMG_004.JPEG');
+    });
+
+    test(
+      'prefers the jpg extension family over jpeg in one directory',
+      () async {
+        await createFile(p.join(tmp.path, 'IMG_005.arw'));
+        await createFile(p.join(tmp.path, 'IMG_005.jpeg'));
+        await createFile(p.join(tmp.path, 'IMG_005.jpg'));
+
+        final pairs = await scanPairs(tmp);
+
+        expect(p.basename(pairs.single.jpg!.path), 'IMG_005.jpg');
+      },
+    );
+
     test('multiple raws each paired correctly', () async {
       await createFile(p.join(tmp.path, 'A.arw'));
       await createFile(p.join(tmp.path, 'A.jpg'));
