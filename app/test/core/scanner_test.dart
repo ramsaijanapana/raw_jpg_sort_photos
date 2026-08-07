@@ -170,6 +170,39 @@ void main() {
       },
     );
 
+    test('does not pair RAW and JPG stems that differ only by case', () async {
+      await createFile(p.join(tmp.path, 'IMG_006.arw'));
+      await createFile(p.join(tmp.path, 'img_006.jpg'));
+
+      final pairs = await scanPairs(tmp);
+
+      expect(pairs.single.jpg, isNull);
+    });
+
+    test(
+      'same-family candidates use code-unit basename order',
+      () async {
+        await createFile(p.join(tmp.path, 'IMG_007.arw'));
+        await createFile(p.join(tmp.path, 'IMG_007.JPG'));
+        await createFile(p.join(tmp.path, 'IMG_007.jpg'));
+
+        final candidateNames = await tmp
+            .list(recursive: false)
+            .where((entity) => entity is File)
+            .map((entity) => p.basename(entity.path))
+            .where((name) => name.toLowerCase() == 'img_007.jpg')
+            .toList();
+        if (candidateNames.length != 2) {
+          markTestSkipped('Requires a case-sensitive filesystem.');
+          return;
+        }
+
+        final pairs = await scanPairs(tmp);
+
+        expect(p.basename(pairs.single.jpg!.path), 'IMG_007.JPG');
+      },
+    );
+
     test('selects companions independently for multiple RAW stems', () async {
       await createFile(p.join(tmp.path, 'A.arw'));
       await createFile(p.join(tmp.path, 'A.jpeg'));
