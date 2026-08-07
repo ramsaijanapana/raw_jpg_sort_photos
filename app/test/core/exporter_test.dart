@@ -1,257 +1,188 @@
 import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
-import 'package:photo_sorter/core/exporter.dart';
 import 'package:photo_sorter/core/cull_session.dart';
+import 'package:photo_sorter/core/exporter.dart';
+import 'package:photo_sorter/core/file_operations.dart';
 import 'package:photo_sorter/core/models.dart';
 
 void main() {
-  late Directory src;
-  late Directory dest;
+  test(
+    'planner exports only kept RAW and JPG when JPGs are included',
+    () async {
+      final sandbox = await Directory.systemTemp.createTemp('export_plan_jpg_');
+      addTearDown(() => sandbox.delete(recursive: true));
+      final source = Directory(p.join(sandbox.path, 'source'));
+      final destination = Directory(p.join(sandbox.path, 'destination'));
+      await source.create();
 
-  setUp(() async {
-    src = await Directory.systemTemp.createTemp('exporter_src_');
-    dest = await Directory.systemTemp.createTemp('exporter_dest_');
-  });
+      Future<File> photo(String name) async {
+        final file = File(p.join(source.path, name));
+        await file.writeAsString(name);
+        return file;
+      }
 
-  tearDown(() async {
-    await src.delete(recursive: true);
-    await dest.delete(recursive: true);
-  });
+      final keptRaw = await photo('kept.arw');
+      final keptJpg = await photo('kept.jpg');
+      final skippedRaw = await photo('skipped.nef');
+      final skippedJpg = await photo('skipped.jpeg');
+      final undecidedRaw = await photo('undecided.cr2');
 
-  Future<File> createFile(String path, [String content = 'data']) async {
-    final f = File(path);
-    await f.parent.create(recursive: true);
-    await f.writeAsString(content);
-    return f;
-  }
-
-  Future<PhotoPair> makePair({
-    required String stem,
-    required String rawExt,
-    String? jpgExt,
-  }) async {
-    final rawFile = await createFile(p.join(src.path, '$stem$rawExt'), 'raw_content');
-    File? jpgFile;
-    if (jpgExt != null) {
-      jpgFile = await createFile(p.join(src.path, '$stem$jpgExt'), 'jpg_content');
-    }
-    return PhotoPair(stem: stem, raw: rawFile, jpg: jpgFile);
-  }
-
-  group('exportKept', () {
-    test('copies kept RAW files', () async {
-      final pair = await makePair(stem: 'DSC_0001', rawExt: '.arw');
-      final session = CullSession({'DSC_0001': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.copied, 1);
-      expect(File(p.join(dest.path, 'DSC_0001.arw')).existsSync(), isTrue);
-    });
-
-    test('copies kept RAW and JPG when includeJpgs=true', () async {
-      final pair = await makePair(stem: 'DSC_0002', rawExt: '.nef', jpgExt: '.jpg');
-      final session = CullSession({'DSC_0002': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
+      final plan = await planKeptPhotoExport(
+        destination: DartFileProviderSelection.fromPath(destination.path),
+        pairs: [
+          KeptPhotoExportSelection(
+            stem: 'kept',
+            raw: DartFileProviderSelection.fromPath(keptRaw.path),
+            jpg: DartFileProviderSelection.fromPath(keptJpg.path),
+          ),
+          KeptPhotoExportSelection(
+            stem: 'skipped',
+            raw: DartFileProviderSelection.fromPath(skippedRaw.path),
+            jpg: DartFileProviderSelection.fromPath(skippedJpg.path),
+          ),
+          KeptPhotoExportSelection(
+            stem: 'undecided',
+            raw: DartFileProviderSelection.fromPath(undecidedRaw.path),
+          ),
+        ],
+        session: CullSession({'kept': CullFlag.keep, 'skipped': CullFlag.skip}),
         includeJpgs: true,
       );
 
-      expect(result.copied, 2);
-      expect(File(p.join(dest.path, 'DSC_0002.nef')).existsSync(), isTrue);
-      expect(File(p.join(dest.path, 'DSC_0002.jpg')).existsSync(), isTrue);
-    });
-
-    test('respects includeJpgs=false: only copies RAW', () async {
-      final pair = await makePair(stem: 'DSC_0003', rawExt: '.cr2', jpgExt: '.jpg');
-      final session = CullSession({'DSC_0003': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.copied, 1);
-      expect(File(p.join(dest.path, 'DSC_0003.cr2')).existsSync(), isTrue);
-      expect(File(p.join(dest.path, 'DSC_0003.jpg')).existsSync(), isFalse);
-    });
-
-    test('skips non-keep flagged pairs', () async {
-      final pair1 = await makePair(stem: 'DSC_0004', rawExt: '.arw');
-      final pair2 = await makePair(stem: 'DSC_0005', rawExt: '.arw');
-      final pair3 = await makePair(stem: 'DSC_0006', rawExt: '.arw');
-
-      final session = CullSession({
-        'DSC_0004': CullFlag.keep,
-        'DSC_0005': CullFlag.skip,
-        // DSC_0006 is undecided
-      });
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair1, pair2, pair3],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.copied, 1);
-      expect(File(p.join(dest.path, 'DSC_0004.arw')).existsSync(), isTrue);
-      expect(File(p.join(dest.path, 'DSC_0005.arw')).existsSync(), isFalse);
-      expect(File(p.join(dest.path, 'DSC_0006.arw')).existsSync(), isFalse);
-    });
-
-    test('skips skip-flagged pairs', () async {
-      final pair = await makePair(stem: 'DSC_0007', rawExt: '.nef', jpgExt: '.jpg');
-      final session = CullSession({'DSC_0007': CullFlag.skip});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: true,
-      );
-
-      expect(result.copied, 0);
-    });
-
-    test('skips undecided pairs', () async {
-      final pair = await makePair(stem: 'DSC_0008', rawExt: '.arw');
-      final session = CullSession(); // all undecided by default
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.copied, 0);
-    });
-
-    test('creates destination directory if needed', () async {
-      final newDest = Directory(p.join(dest.path, 'subdir', 'nested'));
-      final pair = await makePair(stem: 'DSC_0009', rawExt: '.arw');
-      final session = CullSession({'DSC_0009': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: newDest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.copied, 1);
-      expect(newDest.existsSync(), isTrue);
-    });
-
-    test('returned outputPath matches destination', () async {
-      final pair = await makePair(stem: 'DSC_0010', rawExt: '.arw');
-      final session = CullSession({'DSC_0010': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      expect(result.outputPath, dest.path);
-    });
-
-    test('overwrites existing file (matches Python shutil.copy2 behavior)', () async {
-      final pair = await makePair(stem: 'DSC_0011', rawExt: '.arw');
-      // Pre-create file at destination with different content
-      await createFile(p.join(dest.path, 'DSC_0011.arw'), 'old_content');
-
-      final session = CullSession({'DSC_0011': CullFlag.keep});
-      await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: false,
-      );
-
-      // Should be overwritten with new content
+      expect(plan.operations, hasLength(2));
       expect(
-        File(p.join(dest.path, 'DSC_0011.arw')).readAsStringSync(),
-        'raw_content',
+        plan.operations.map((operation) => operation.destination.opaqueItem),
+        [
+          p.join(destination.path, 'kept.arw'),
+          p.join(destination.path, 'kept.jpg'),
+        ],
       );
-    });
-
-    test('handles raw-only pair with includeJpgs=true gracefully', () async {
-      final pair = await makePair(stem: 'DSC_0012', rawExt: '.arw'); // no jpg
-      final session = CullSession({'DSC_0012': CullFlag.keep});
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair],
-        session: session,
-        includeJpgs: true,
+      expect(
+        plan.operations.map((operation) => operation.intent),
+        everyElement(FileOperationIntent.copy),
       );
-
-      // Only RAW copied since jpg is null
-      expect(result.copied, 1);
-    });
-
-    test('skips a missing source raw, still copies the rest (P0-7)', () async {
-      // pair1: source RAW exists. pair2: source RAW deleted before export.
-      final pair1 = await makePair(stem: 'GOOD', rawExt: '.arw');
-      final pair2 = await makePair(stem: 'GONE', rawExt: '.arw');
-      // Remove the source for pair2 so its copy must be skipped, not abort all.
-      await pair2.raw.delete();
-
-      final session = CullSession({
-        'GOOD': CullFlag.keep,
-        'GONE': CullFlag.keep,
-      });
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair2, pair1], // missing one first to prove it doesn't abort
-        session: session,
-        includeJpgs: false,
+      expect(
+        plan.operations.map((operation) => operation.preview.source.label),
+        ['kept.arw', 'kept.jpg'],
       );
-
-      // Only the existing source was copied; count reflects successes only.
-      expect(result.copied, 1);
-      expect(File(p.join(dest.path, 'GOOD.arw')).existsSync(), isTrue);
-      expect(File(p.join(dest.path, 'GONE.arw')).existsSync(), isFalse);
-    });
-
-    test('empty pairs list returns zero copied', () async {
-      final session = CullSession();
-
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [],
-        session: session,
-        includeJpgs: true,
+      expect(
+        plan.operations.map((operation) => operation.preview.destination.label),
+        ['destination/kept.arw', 'destination/kept.jpg'],
       );
+      expect(
+        plan.operations.every(
+          (operation) =>
+              !operation.preview.source.label.contains(sandbox.path) &&
+              !operation.preview.destination.label.contains(sandbox.path),
+        ),
+        isTrue,
+      );
+      expect(await destination.exists(), isFalse);
+    },
+  );
 
-      expect(result.copied, 0);
-    });
+  test('planner excludes JPGs and supports kept RAW-only pairs', () async {
+    final sandbox = await Directory.systemTemp.createTemp('export_plan_raw_');
+    addTearDown(() => sandbox.delete(recursive: true));
+    final source = Directory(p.join(sandbox.path, 'source'));
+    final destination = Directory(p.join(sandbox.path, 'destination'));
+    await source.create();
+    final firstRaw = File(p.join(source.path, 'first.arw'));
+    final firstJpg = File(p.join(source.path, 'first.jpg'));
+    final rawOnly = File(p.join(source.path, 'raw_only.raf'));
+    await firstRaw.writeAsString('first raw');
+    await firstJpg.writeAsString('first jpg');
+    await rawOnly.writeAsString('raw only');
+
+    final plan = await planKeptPhotoExport(
+      destination: DartFileProviderSelection.fromPath(destination.path),
+      pairs: [
+        KeptPhotoExportSelection(
+          stem: 'first',
+          raw: DartFileProviderSelection.fromPath(firstRaw.path),
+          jpg: DartFileProviderSelection.fromPath(firstJpg.path),
+        ),
+        KeptPhotoExportSelection(
+          stem: 'raw_only',
+          raw: DartFileProviderSelection.fromPath(rawOnly.path),
+        ),
+      ],
+      session: CullSession({'first': CullFlag.keep, 'raw_only': CullFlag.keep}),
+      includeJpgs: false,
+    );
+
+    expect(
+      plan.operations.map((operation) => operation.destination.opaqueItem),
+      [
+        p.join(destination.path, 'first.arw'),
+        p.join(destination.path, 'raw_only.raf'),
+      ],
+    );
+    expect(
+      plan.operations.map((operation) => operation.preview.destination.label),
+      ['destination/first.arw', 'destination/raw_only.raf'],
+    );
+    expect(await destination.exists(), isFalse);
   });
+
+  test('planner returns an empty plan when no photo is kept', () async {
+    final sandbox = await Directory.systemTemp.createTemp('export_plan_empty_');
+    addTearDown(() => sandbox.delete(recursive: true));
+    final source = File(p.join(sandbox.path, 'photo.arw'));
+    final destination = Directory(p.join(sandbox.path, 'destination'));
+    await source.writeAsString('raw');
+
+    final plan = await planKeptPhotoExport(
+      destination: DartFileProviderSelection.fromPath(destination.path),
+      pairs: [
+        KeptPhotoExportSelection(
+          stem: 'photo',
+          raw: DartFileProviderSelection.fromPath(source.path),
+        ),
+      ],
+      session: CullSession({'photo': CullFlag.skip}),
+      includeJpgs: true,
+    );
+
+    expect(plan.operations, isEmpty);
+    expect(await destination.exists(), isFalse);
+  });
+
+  test(
+    'legacy exporter fails closed before creating or replacing anything',
+    () async {
+      final sandbox = await Directory.systemTemp.createTemp('exporter_safe_');
+      try {
+        final sourceDirectory = Directory(p.join(sandbox.path, 'source'));
+        final destination = Directory(p.join(sandbox.path, 'destination'));
+        final source = File(p.join(sourceDirectory.path, 'photo.arw'));
+        await source.parent.create(recursive: true);
+        await source.writeAsString('source');
+
+        await expectLater(
+          exportKept(
+            source: sourceDirectory,
+            destination: destination,
+            pairs: [PhotoPair(stem: 'photo', raw: source)],
+            session: CullSession({'photo': CullFlag.keep}),
+            includeJpgs: false,
+          ),
+          throwsA(
+            isA<UnsupportedError>().having(
+              (error) => error.message,
+              'message',
+              contains('Task 3B'),
+            ),
+          ),
+        );
+
+        expect(await source.readAsString(), 'source');
+        expect(await destination.exists(), isFalse);
+      } finally {
+        await sandbox.delete(recursive: true);
+      }
+    },
+  );
 }

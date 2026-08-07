@@ -54,35 +54,38 @@ void main() {
     });
   });
 
-  group('SortController.cancel', () {
-    test('cancel() while sorting sets cancelled phase', () async {
-      final tmp = await Directory.systemTemp.createTemp('ctrl_cancel_');
-      addTearDown(() => tmp.delete(recursive: true));
+  group('SortController legacy safety gate', () {
+    test(
+      'direct start fails closed until Task 3B without mutating files',
+      () async {
+        final tmp = await Directory.systemTemp.createTemp('ctrl_cancel_');
+        addTearDown(() => tmp.delete(recursive: true));
 
-      // Create files to sort.
-      for (var i = 1; i <= 10; i++) {
-        File(p.join(tmp.path, 'img$i.arw')).writeAsStringSync('data');
-      }
+        // Create files to sort.
+        for (var i = 1; i <= 10; i++) {
+          File(p.join(tmp.path, 'img$i.arw')).writeAsStringSync('data');
+        }
 
-      final container = await makeContainer();
-      addTearDown(container.dispose);
+        final container = await makeContainer();
+        addTearDown(container.dispose);
 
-      final ctrl = container.read(sortControllerProvider.notifier);
-      await ctrl.setInput(tmp.path);
+        final ctrl = container.read(sortControllerProvider.notifier);
+        await ctrl.setInput(tmp.path);
 
-      // Start the sort and immediately cancel.
-      final sortFuture = ctrl.start();
-      ctrl.cancel();
-      await sortFuture;
+        await ctrl.start();
 
-      final state = container.read(sortControllerProvider);
-      // Should either be cancelled or done (race), but if cancelled it's correct.
-      expect(
-        state.phase == SortPhase.cancelled || state.phase == SortPhase.done,
-        isTrue,
-        reason: 'Expected cancelled or done after cancel(), got ${state.phase}',
-      );
-    });
+        final state = container.read(sortControllerProvider);
+        expect(state.phase, SortPhase.error);
+        expect(state.message, contains('Task 3B'));
+        for (var i = 1; i <= 10; i++) {
+          expect(
+            File(p.join(tmp.path, 'img$i.arw')).readAsStringSync(),
+            'data',
+          );
+        }
+        expect(Directory(p.join(tmp.path, 'RAW')).existsSync(), isFalse);
+      },
+    );
   });
 
   group('SortPhase.cancelled', () {
