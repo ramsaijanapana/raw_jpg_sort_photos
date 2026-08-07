@@ -170,6 +170,21 @@ void main() {
       },
     );
 
+    test('selects companions independently for multiple RAW stems', () async {
+      await createFile(p.join(tmp.path, 'A.arw'));
+      await createFile(p.join(tmp.path, 'A.jpeg'));
+      await createFile(p.join(tmp.path, 'A.jpg'));
+      await createFile(p.join(tmp.path, 'B.nef'));
+      await createFile(p.join(tmp.path, 'JPG', 'B.JPEG'));
+
+      final pairs = await scanPairs(tmp);
+
+      expect(
+        pairs.map((pair) => p.basename(pair.jpg!.path)).toList(),
+        ['A.jpg', 'B.JPEG'],
+      );
+    });
+
     test('multiple raws each paired correctly', () async {
       await createFile(p.join(tmp.path, 'A.arw'));
       await createFile(p.join(tmp.path, 'A.jpg'));

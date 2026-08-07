@@ -46,11 +46,17 @@ Future<List<File>> scanRaws(Directory folder) async {
 Future<List<PhotoPair>> scanPairs(Directory folder) async {
   final raws = await scanRaws(folder);
   final jpgSub = Directory(p.join(folder.path, 'JPG'));
+  final indexes = await Future.wait([
+    _indexCompanionJpgs(folder),
+    _indexCompanionJpgs(jpgSub),
+  ]);
+  final rootJpgs = indexes[0];
+  final subdirectoryJpgs = indexes[1];
 
   final pairs = <PhotoPair>[];
   for (final rawFile in raws) {
     final stem = p.basenameWithoutExtension(rawFile.path);
-    final foundJpg = await _findCompanionJpg(stem, [folder, jpgSub]);
+    final foundJpg = rootJpgs[stem] ?? subdirectoryJpgs[stem];
 
     pairs.add(PhotoPair(stem: stem, raw: rawFile, jpg: foundJpg));
   }
@@ -58,37 +64,33 @@ Future<List<PhotoPair>> scanPairs(Directory folder) async {
   return pairs;
 }
 
-Future<File?> _findCompanionJpg(
-  String stem,
-  List<Directory> directories,
-) async {
-  for (final directory in directories) {
-    if (!await directory.exists()) continue;
+Future<Map<String, File>> _indexCompanionJpgs(Directory directory) async {
+  final jpgsByStem = <String, File>{};
+  if (!await directory.exists()) return jpgsByStem;
 
-    final candidates = <File>[];
-    await for (final entity in directory.list(recursive: false)) {
-      if (entity is! File) continue;
+  await for (final entity in directory.list(recursive: false)) {
+    if (entity is! File) continue;
 
-      final extension = p.extension(entity.path).toLowerCase();
-      if ((extension == '.jpg' || extension == '.jpeg') &&
-          p.basenameWithoutExtension(entity.path) == stem) {
-        candidates.add(entity);
-      }
+    final extension = p.extension(entity.path).toLowerCase();
+    if (extension != '.jpg' && extension != '.jpeg') continue;
+
+    final stem = p.basenameWithoutExtension(entity.path);
+    final existing = jpgsByStem[stem];
+    if (existing == null || _compareJpgCandidates(entity, existing) < 0) {
+      jpgsByStem[stem] = entity;
     }
-
-    candidates.sort((a, b) {
-      final extensionComparison = _jpgExtensionRank(
-        a.path,
-      ).compareTo(_jpgExtensionRank(b.path));
-      return extensionComparison != 0
-          ? extensionComparison
-          : p.basename(a.path).compareTo(p.basename(b.path));
-    });
-    if (candidates.isNotEmpty) return candidates.first;
   }
 
-  return null;
+  return jpgsByStem;
 }
 
 int _jpgExtensionRank(String path) =>
     p.extension(path).toLowerCase() == '.jpg' ? 0 : 1;
+
+int _compareJpgCandidates(File a, File b) {
+  final extensionComparison =
+      _jpgExtensionRank(a.path).compareTo(_jpgExtensionRank(b.path));
+  return extensionComparison != 0
+      ? extensionComparison
+      : p.basename(a.path).compareTo(p.basename(b.path));
+}
