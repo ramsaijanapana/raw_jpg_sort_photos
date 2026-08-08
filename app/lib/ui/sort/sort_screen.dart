@@ -7,9 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
 import '../../state/sort_controller.dart';
+import '../../state/file_operation_workflow.dart';
+import '../file_operation/file_operation_dialog.dart';
 
 class SortScreen extends ConsumerWidget {
-  const SortScreen({super.key});
+  const SortScreen({super.key, this.active = true});
+
+  final bool active;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -17,7 +21,9 @@ class SortScreen extends ConsumerWidget {
     final ctrl = ref.read(sortControllerProvider.notifier);
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final sorting = state.phase == SortPhase.sorting;
+    final workflow = ref.watch(sortFileOperationWorkflowProvider);
+    final workflowActive = workflow.isActive;
+    final selectionEnabled = active && !workflowActive;
 
     return Scaffold(
       body: Center(
@@ -48,36 +54,43 @@ class SortScreen extends ConsumerWidget {
                 // Folder pick card (hero + drop zone)
                 _FolderPickCard(
                   inputPath: state.inputPath,
-                  onTap: sorting ? null : () => ctrl.pickInput(),
-                  onDropPath: sorting ? null : (path) => ctrl.setInput(path),
+                  onTap: selectionEnabled ? () => ctrl.pickInput() : null,
+                  onDropPath: selectionEnabled
+                      ? (path) => ctrl.setInput(path)
+                      : null,
                 ),
                 const SizedBox(height: 20),
 
                 // Output folder row
                 _OutputRow(
                   outputPath: state.outputPath,
-                  onBrowse: sorting ? null : () => ctrl.pickOutput(),
+                  onBrowse: selectionEnabled ? () => ctrl.pickOutput() : null,
                 ),
                 const SizedBox(height: 24),
 
                 // Sort button or Cancel button
                 SizedBox(
                   height: 52,
-                  child: sorting
-                      ? OutlinedButton(
-                          onPressed: () => ctrl.cancel(),
-                          child: const Text('Cancel'),
-                        )
-                      : FilledButton(
-                          onPressed: state.inputPath == null
-                              ? null
-                              : () => ctrl.start(),
-                          child: const Text('Sort Photos'),
-                        ),
+                  child: FilledButton(
+                    onPressed: state.inputPath == null || !selectionEnabled
+                        ? null
+                        : () async {
+                            final preparation = ctrl.prepareSort();
+                            await showFileOperationDialog(
+                              context: context,
+                              workflowProvider:
+                                  sortFileOperationWorkflowProvider,
+                              title: 'Review sort changes',
+                              preparation: preparation,
+                            );
+                            await preparation;
+                          },
+                    child: const Text('Preview Sort'),
+                  ),
                 ),
 
                 // "Choose a folder to enable" hint when disabled
-                if (!sorting && state.inputPath == null) ...[
+                if (!workflowActive && state.inputPath == null) ...[
                   const SizedBox(height: 8),
                   Text(
                     'Choose a folder to enable',
@@ -89,7 +102,7 @@ class SortScreen extends ConsumerWidget {
                 ],
 
                 // Progress indicator
-                if (sorting) ...[
+                if (state.phase == SortPhase.sorting) ...[
                   const SizedBox(height: 16),
                   LinearProgressIndicator(
                     value: state.progress != null
@@ -174,8 +187,8 @@ class _FolderPickCardState extends State<_FolderPickCard> {
           color: _dragging
               ? cs.primary
               : hasFolder
-                  ? cs.primary
-                  : cs.outline,
+              ? cs.primary
+              : cs.outline,
           width: _dragging ? 2.0 : (hasFolder ? 2.0 : 1.5),
         ),
         color: _dragging
@@ -190,21 +203,17 @@ class _FolderPickCardState extends State<_FolderPickCard> {
           child: _dragging
               ? _DropHint(cs: cs)
               : hasFolder
-                  ? _FolderContent(
-                      inputPath: widget.inputPath!,
-                      theme: theme,
-                      cs: cs,
-                    )
-                  : _EmptyContent(
-                      theme: theme,
-                      cs: cs,
-                      isDesktop: _isDesktop,
-                    ),
+              ? _FolderContent(
+                  inputPath: widget.inputPath!,
+                  theme: theme,
+                  cs: cs,
+                )
+              : _EmptyContent(theme: theme, cs: cs, isDesktop: _isDesktop),
         ),
       ),
     );
 
-    if (_isDesktop) {
+    if (_isDesktop && widget.onDropPath != null) {
       card = DropTarget(
         onDragEntered: (_) => setState(() => _dragging = true),
         onDragExited: (_) => setState(() => _dragging = false),
@@ -235,8 +244,10 @@ class _DropHint extends StatelessWidget {
             color: cs.primaryContainer,
             shape: BoxShape.circle,
           ),
-          child: Icon(Icons.drive_folder_upload_outlined,
-              color: cs.onPrimaryContainer),
+          child: Icon(
+            Icons.drive_folder_upload_outlined,
+            color: cs.onPrimaryContainer,
+          ),
         ),
         const SizedBox(width: 16),
         Text(
@@ -408,8 +419,9 @@ class _OutputRow extends StatelessWidget {
                 child: Text(
                   outputPath ?? 'Same as input folder',
                   style: theme.textTheme.bodyMedium?.copyWith(
-                    color:
-                        outputPath == null ? cs.onSurfaceVariant : cs.onSurface,
+                    color: outputPath == null
+                        ? cs.onSurfaceVariant
+                        : cs.onSurface,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -447,8 +459,7 @@ class _StatusCard extends StatelessWidget {
 
       case SortPhase.done:
         final result = state.result!;
-        final basename =
-            result.outputPath.split(RegExp(r'[/\\]')).last;
+        final basename = result.outputPath.split(RegExp(r'[/\\]')).last;
         final verb = result.moved ? 'Moved' : 'Copied';
 
         return Card(
@@ -544,10 +555,7 @@ class _StatusCard extends StatelessWidget {
             padding: const EdgeInsets.all(20),
             child: Row(
               children: [
-                Icon(
-                  Icons.info_outline,
-                  color: cs.onTertiaryContainer,
-                ),
+                Icon(Icons.info_outline, color: cs.onTertiaryContainer),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
@@ -570,10 +578,7 @@ class _StatusCard extends StatelessWidget {
             padding: const EdgeInsets.all(20),
             child: Row(
               children: [
-                Icon(
-                  Icons.error_outline,
-                  color: cs.onErrorContainer,
-                ),
+                Icon(Icons.error_outline, color: cs.onErrorContainer),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(

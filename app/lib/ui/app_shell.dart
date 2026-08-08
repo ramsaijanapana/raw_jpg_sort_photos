@@ -27,9 +27,9 @@ class _AppShellState extends State<AppShell> {
   ];
 
   List<Widget> get _pages => [
-        const SortScreen(),
-        ReviewScreen(active: _selectedIndex == 1),
-      ];
+    SortScreen(active: _selectedIndex == 0),
+    ReviewScreen(active: _selectedIndex == 1),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -77,14 +77,10 @@ class _AppShellState extends State<AppShell> {
           }
 
           return Scaffold(
-            body: IndexedStack(
-              index: _selectedIndex,
-              children: _pages,
-            ),
+            body: IndexedStack(index: _selectedIndex, children: _pages),
             bottomNavigationBar: NavigationBar(
               selectedIndex: _selectedIndex,
-              onDestinationSelected: (i) =>
-                  setState(() => _selectedIndex = i),
+              onDestinationSelected: (i) => setState(() => _selectedIndex = i),
               destinations: [
                 for (final d in _destinations)
                   NavigationDestination(

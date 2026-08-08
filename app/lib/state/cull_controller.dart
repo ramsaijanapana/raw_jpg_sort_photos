@@ -9,25 +9,29 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/cull_session.dart';
 import '../core/exif_reader.dart';
 import '../core/exporter.dart';
+import '../core/file_operations.dart';
 import '../core/models.dart';
 import '../core/raw_preview/raw_preview_extractor.dart';
 import '../core/scanner.dart';
 import '../services/prefs_service.dart';
+import 'file_operation_workflow.dart';
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 class CullState {
-  const CullState({
+  CullState({
     this.dir,
-    this.pairs = const [],
-    this.flags = const {},
+    List<PhotoPair> pairs = const [],
+    Map<String, CullFlag> flags = const {},
     this.index = 0,
     this.mode = 'jpg',
     this.loading = false,
     this.error,
-  });
+    this.exportDestinationPending = false,
+  }) : pairs = List<PhotoPair>.unmodifiable(pairs),
+       flags = Map<String, CullFlag>.unmodifiable(flags);
 
   final Directory? dir;
   final List<PhotoPair> pairs;
@@ -36,6 +40,7 @@ class CullState {
   final String mode; // 'jpg' | 'raw'
   final bool loading;
   final String? error;
+  final bool exportDestinationPending;
 
   CullState copyWith({
     Object? dir = _sentinel,
@@ -45,6 +50,7 @@ class CullState {
     String? mode,
     bool? loading,
     Object? error = _sentinel,
+    bool? exportDestinationPending,
   }) {
     return CullState(
       dir: dir == _sentinel ? this.dir : dir as Directory?,
@@ -54,6 +60,8 @@ class CullState {
       mode: mode ?? this.mode,
       loading: loading ?? this.loading,
       error: error == _sentinel ? this.error : error as String?,
+      exportDestinationPending:
+          exportDestinationPending ?? this.exportDestinationPending,
     );
   }
 
@@ -63,14 +71,11 @@ class CullState {
   PhotoPair? get currentPair =>
       pairs.isNotEmpty && index < pairs.length ? pairs[index] : null;
 
-  int get keptCount =>
-      flags.values.where((f) => f == CullFlag.keep).length;
+  int get keptCount => flags.values.where((f) => f == CullFlag.keep).length;
 
-  int get skipCount =>
-      flags.values.where((f) => f == CullFlag.skip).length;
+  int get skipCount => flags.values.where((f) => f == CullFlag.skip).length;
 
-  int get undecidedCount =>
-      pairs.length - keptCount - skipCount;
+  int get undecidedCount => pairs.length - keptCount - skipCount;
 
   int get decidedCount => keptCount + skipCount;
 }
@@ -163,7 +168,10 @@ typedef PreviewKey = ({String stem, String mode});
 
 /// Holds the full-resolution preview LRU keyed by (stem, mode).
 class PreviewCache {
-  final lru = LruCache<PreviewKey, Uint8List?>(32 * 1024 * 1024, _previewSizeOf);
+  final lru = LruCache<PreviewKey, Uint8List?>(
+    32 * 1024 * 1024,
+    _previewSizeOf,
+  );
 }
 
 /// Holds the filmstrip thumbnail LRU keyed by stem.
@@ -172,41 +180,40 @@ class ThumbnailCache {
 }
 
 final previewCacheProvider = Provider<PreviewCache>((_) => PreviewCache());
-final thumbnailCacheProvider = Provider<ThumbnailCache>((_) => ThumbnailCache());
+final thumbnailCacheProvider = Provider<ThumbnailCache>(
+  (_) => ThumbnailCache(),
+);
 
 // ---------------------------------------------------------------------------
 // Preview FutureProvider.family (autoDispose — the LRU is the only retention)
 // ---------------------------------------------------------------------------
 
-final previewProvider =
-    FutureProvider.autoDispose.family<Uint8List?, PreviewKey>(
-  (ref, key) async {
-    final cache = ref.read(previewCacheProvider);
-    if (cache.lru.containsKey(key)) {
-      return cache.lru.get(key)!.value;
-    }
+final previewProvider = FutureProvider.autoDispose
+    .family<Uint8List?, PreviewKey>((ref, key) async {
+      final cache = ref.read(previewCacheProvider);
+      if (cache.lru.containsKey(key)) {
+        return cache.lru.get(key)!.value;
+      }
 
-    final pair = _lookupPair(ref, key.stem);
-    if (pair == null) return null;
+      final pair = _lookupPair(ref, key.stem);
+      if (pair == null) return null;
 
-    Uint8List? bytes;
-    if (key.mode == 'jpg' && pair.jpg != null) {
-      bytes = await pair.jpg!.readAsBytes();
-    } else {
-      bytes = await extractPreview(pair.raw);
-    }
+      Uint8List? bytes;
+      if (key.mode == 'jpg' && pair.jpg != null) {
+        bytes = await pair.jpg!.readAsBytes();
+      } else {
+        bytes = await extractPreview(pair.raw);
+      }
 
-    cache.lru.put(key, bytes);
-    return bytes;
-  },
-);
+      cache.lru.put(key, bytes);
+      return bytes;
+    });
 
 // ---------------------------------------------------------------------------
 // Thumbnail FutureProvider.family (autoDispose + own LRU)
 // ---------------------------------------------------------------------------
 
-final thumbnailProvider =
-    FutureProvider.autoDispose.family<Uint8List?, String>(
+final thumbnailProvider = FutureProvider.autoDispose.family<Uint8List?, String>(
   (ref, stem) async {
     final cache = ref.read(thumbnailCacheProvider);
     if (cache.lru.containsKey(stem)) {
@@ -235,29 +242,29 @@ final thumbnailProvider =
 /// Provides [ExifSummary?] for a given photo stem.
 /// Reads the JPG bytes if present, else the first 512 KB of the RAW file.
 /// Parsing runs in a separate isolate so the UI thread stays responsive.
-final exifProvider =
-    FutureProvider.autoDispose.family<ExifSummary?, String>(
-  (ref, stem) async {
-    final pair = _lookupPair(ref, stem);
-    if (pair == null) return null;
+final exifProvider = FutureProvider.autoDispose.family<ExifSummary?, String>((
+  ref,
+  stem,
+) async {
+  final pair = _lookupPair(ref, stem);
+  if (pair == null) return null;
 
-    Uint8List bytes;
-    if (pair.jpg != null) {
-      bytes = await pair.jpg!.readAsBytes();
-    } else {
-      // Read only first 512 KB for EXIF header parsing.
-      final raf = await pair.raw.open();
-      try {
-        final length = (await pair.raw.length()).clamp(0, 512 * 1024);
-        bytes = await raf.read(length);
-      } finally {
-        await raf.close();
-      }
+  Uint8List bytes;
+  if (pair.jpg != null) {
+    bytes = await pair.jpg!.readAsBytes();
+  } else {
+    // Read only first 512 KB for EXIF header parsing.
+    final raf = await pair.raw.open();
+    try {
+      final length = (await pair.raw.length()).clamp(0, 512 * 1024);
+      bytes = await raf.read(length);
+    } finally {
+      await raf.close();
     }
+  }
 
-    return Isolate.run(() => readExifSummary(bytes));
-  },
-);
+  return Isolate.run(() => readExifSummary(bytes));
+});
 
 /// Null-safe lookup of the current pair by stem. Returns null (rather than
 /// throwing) when the stem is no longer present — e.g. during a folder switch.
@@ -273,9 +280,21 @@ PhotoPair? _lookupPair(Ref ref, String stem) {
 // CullController Notifier
 // ---------------------------------------------------------------------------
 
+typedef CullExportSelectionRevision = ({
+  int folderGeneration,
+  int decisionsGeneration,
+});
+
+typedef CullExportIntent = ({
+  int generation,
+  CullExportSelectionRevision selectionRevision,
+});
+
 class CullController extends Notifier<CullState> {
   Timer? _advanceTimer;
   int _openGeneration = 0;
+  int _exportDecisionsGeneration = 0;
+  int _exportIntentGeneration = 0;
 
   /// Undo stack: each entry records the stem, previous flag, and index at the
   /// time of the change. Capped at 50 entries.
@@ -284,18 +303,55 @@ class CullController extends Notifier<CullState> {
   @override
   CullState build() {
     ref.onDispose(() => _advanceTimer?.cancel());
-    return const CullState();
+    ref.listen(exportFileOperationWorkflowProvider, (_, _) {
+      _exportIntentGeneration++;
+      if (state.exportDestinationPending) {
+        state = state.copyWith(exportDestinationPending: false);
+      }
+    });
+    return CullState();
   }
 
-  Future<void> openFolder(String path) async {
+  int? beginOpenFolderSelection() {
+    if (state.loading ||
+        state.exportDestinationPending ||
+        ref.read(exportFileOperationWorkflowProvider).isActive) {
+      return null;
+    }
+    return ++_openGeneration;
+  }
+
+  Future<void> openFolder(String path, {int? selectionGeneration}) async {
+    if (state.exportDestinationPending ||
+        ref.read(exportFileOperationWorkflowProvider).isActive) {
+      return;
+    }
     _advanceTimer?.cancel();
-    final gen = ++_openGeneration;
+    final int gen;
+    if (selectionGeneration != null) {
+      if (selectionGeneration != _openGeneration) return;
+      gen = selectionGeneration;
+    } else {
+      gen = ++_openGeneration;
+    }
 
     _undoStack.clear();
-    state = state.copyWith(loading: true, error: null);
+    _exportDecisionsGeneration++;
+    state = state.copyWith(
+      dir: null,
+      pairs: const [],
+      flags: const {},
+      index: 0,
+      loading: true,
+      error: null,
+      exportDestinationPending: false,
+    );
 
     try {
       final dir = Directory(path);
+      if (!await dir.exists()) {
+        throw const FileSystemException('Selected folder is unavailable.');
+      }
       final pairs = await scanPairs(dir);
       if (gen != _openGeneration) return;
       pairs.sort((a, b) => a.stem.compareTo(b.stem));
@@ -304,12 +360,13 @@ class CullController extends Notifier<CullState> {
 
       state = state.copyWith(
         dir: dir,
-        pairs: pairs,
+        pairs: List<PhotoPair>.unmodifiable(pairs),
         flags: Map.unmodifiable(Map<String, CullFlag>.from(session.flags)),
         index: 0,
         loading: false,
         error: null,
       );
+      _exportDecisionsGeneration++;
 
       // Persist the folder path for 'Resume' feature.
       try {
@@ -319,11 +376,11 @@ class CullController extends Notifier<CullState> {
       }
 
       _preloadNeighbors(0);
-    } catch (e) {
+    } on Object {
       if (gen != _openGeneration) return;
       state = state.copyWith(
         loading: false,
-        error: 'Failed to open folder: $e',
+        error: 'Could not open that folder. Choose a folder and try again.',
       );
     }
   }
@@ -331,7 +388,7 @@ class CullController extends Notifier<CullState> {
   /// Undo the last flag change: restores the previous flag and navigates
   /// back to the affected photo. No-op when the stack is empty.
   Future<void> undo() async {
-    if (_undoStack.isEmpty) return;
+    if (!_exportSelectionCanChange || _undoStack.isEmpty) return;
     // A pending auto-advance from the flag being undone must not fire after
     // the undo navigates back.
     _advanceTimer?.cancel();
@@ -348,6 +405,7 @@ class CullController extends Notifier<CullState> {
       flags: Map.unmodifiable(newFlags),
       index: entry.index,
     );
+    _exportDecisionsGeneration++;
     await _saveSession();
   }
 
@@ -362,15 +420,15 @@ class CullController extends Notifier<CullState> {
   void nav(int delta) => goto(state.index + delta);
 
   Future<void> keep() async {
+    if (!_exportSelectionCanChange) return;
     _advanceTimer?.cancel();
-    await _setFlag(CullFlag.keep);
-    _autoAdvance();
+    if (await _setFlag(CullFlag.keep)) _autoAdvance();
   }
 
   Future<void> skip() async {
+    if (!_exportSelectionCanChange) return;
     _advanceTimer?.cancel();
-    await _setFlag(CullFlag.skip);
-    _autoAdvance();
+    if (await _setFlag(CullFlag.skip)) _autoAdvance();
   }
 
   Future<void> unflag() async {
@@ -385,30 +443,119 @@ class CullController extends Notifier<CullState> {
     state = state.copyWith(mode: mode);
   }
 
-  Future<ExportResult> export({
+  Future<void> prepareExport({
     required String destinationPath,
     required bool includeJpgs,
+    CullExportSelectionRevision? selectionRevision,
+    CullExportIntent? exportIntent,
   }) async {
+    final expectedSelectionRevision =
+        exportIntent?.selectionRevision ?? selectionRevision;
+    if (state.loading ||
+        state.error != null ||
+        (state.exportDestinationPending && exportIntent == null) ||
+        ref.read(exportFileOperationWorkflowProvider).isActive ||
+        (expectedSelectionRevision != null &&
+            expectedSelectionRevision != _currentExportSelectionRevision) ||
+        (exportIntent != null && !_isExportIntentCurrent(exportIntent))) {
+      return;
+    }
     final dir = state.dir;
-    if (dir == null) throw StateError('No folder open');
+    if (dir == null) return;
+    _exportIntentGeneration++;
+    if (state.exportDestinationPending) {
+      state = state.copyWith(exportDestinationPending: false);
+    }
 
-    final session = _buildSession();
-    return exportKept(
-      source: dir,
-      destination: Directory(destinationPath),
-      pairs: state.pairs,
-      session: session,
-      includeJpgs: includeJpgs,
-    );
+    final pairs = List<PhotoPair>.unmodifiable(state.pairs);
+    final session = CullSession(Map<String, CullFlag>.from(state.flags));
+    final destination = DartFileProviderSelection.fromPath(destinationPath);
+    final selections = List<KeptPhotoExportSelection>.unmodifiable([
+      for (final pair in pairs)
+        KeptPhotoExportSelection(
+          stem: pair.stem,
+          raw: DartFileProviderSelection.fromPath(pair.raw.path),
+          jpg: pair.jpg == null
+              ? null
+              : DartFileProviderSelection.fromPath(pair.jpg!.path),
+        ),
+    ]);
+    await ref
+        .read(exportFileOperationWorkflowProvider.notifier)
+        .prepare(
+          (platform) => planKeptPhotoExport(
+            destination: destination,
+            pairs: selections,
+            session: session,
+            includeJpgs: includeJpgs,
+            platform: platform,
+          ),
+        );
   }
+
+  CullExportSelectionRevision? captureExportSelectionRevision() {
+    if (state.dir == null ||
+        state.loading ||
+        state.error != null ||
+        state.exportDestinationPending ||
+        ref.read(exportFileOperationWorkflowProvider).isActive) {
+      return null;
+    }
+    return _currentExportSelectionRevision;
+  }
+
+  CullExportIntent? beginExportIntent() {
+    if (state.dir == null ||
+        state.loading ||
+        state.error != null ||
+        ref.read(exportFileOperationWorkflowProvider).isActive) {
+      return null;
+    }
+    final intent = (
+      generation: ++_exportIntentGeneration,
+      selectionRevision: _currentExportSelectionRevision,
+    );
+    state = state.copyWith(exportDestinationPending: true);
+    return intent;
+  }
+
+  bool isExportIntentCurrent(CullExportIntent intent) =>
+      !state.loading &&
+      state.error == null &&
+      state.exportDestinationPending &&
+      !ref.read(exportFileOperationWorkflowProvider).isActive &&
+      _isExportIntentCurrent(intent);
+
+  void cancelExportIntent(CullExportIntent intent) {
+    if (intent.generation != _exportIntentGeneration) return;
+    _exportIntentGeneration++;
+    if (state.exportDestinationPending) {
+      state = state.copyWith(exportDestinationPending: false);
+    }
+  }
+
+  bool _isExportIntentCurrent(CullExportIntent intent) =>
+      intent.generation == _exportIntentGeneration &&
+      intent.selectionRevision == _currentExportSelectionRevision;
+
+  CullExportSelectionRevision get _currentExportSelectionRevision => (
+    folderGeneration: _openGeneration,
+    decisionsGeneration: _exportDecisionsGeneration,
+  );
 
   // -------------------------------------------------------------------------
   // Internals
   // -------------------------------------------------------------------------
 
-  Future<void> _setFlag(CullFlag flag) async {
+  bool get _exportSelectionCanChange =>
+      !state.loading &&
+      !state.exportDestinationPending &&
+      !ref.read(exportFileOperationWorkflowProvider).isActive;
+
+  Future<bool> _setFlag(CullFlag flag) async {
+    if (!_exportSelectionCanChange) return false;
     final pair = state.currentPair;
-    if (pair == null) return;
+    if (pair == null) return false;
 
     // Push undo entry BEFORE mutating.
     final prev = state.flags[pair.stem] ?? CullFlag.undecided;
@@ -423,7 +570,9 @@ class CullController extends Notifier<CullState> {
     }
 
     state = state.copyWith(flags: Map.unmodifiable(newFlags));
+    _exportDecisionsGeneration++;
     await _saveSession();
+    return true;
   }
 
   Future<void> _saveSession() async {
@@ -472,5 +621,6 @@ class CullController extends Notifier<CullState> {
   }
 }
 
-final cullControllerProvider =
-    NotifierProvider<CullController, CullState>(CullController.new);
+final cullControllerProvider = NotifierProvider<CullController, CullState>(
+  CullController.new,
+);

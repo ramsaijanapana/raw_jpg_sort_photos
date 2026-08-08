@@ -12,6 +12,8 @@ import '../../core/models.dart';
 import '../../services/file_pick_service.dart';
 import '../../services/prefs_service.dart';
 import '../../state/cull_controller.dart';
+import '../../state/file_operation_workflow.dart';
+import '../file_operation/file_operation_dialog.dart';
 
 // ---------------------------------------------------------------------------
 // Palette constants
@@ -46,11 +48,11 @@ class ReviewScreen extends ConsumerWidget {
     );
 
     return Theme(
-      data: ThemeData(
-        colorScheme: darkScheme,
-        useMaterial3: true,
+      data: ThemeData(colorScheme: darkScheme, useMaterial3: true),
+      child: ExcludeFocus(
+        excluding: !active,
+        child: _ReviewBody(active: active),
       ),
-      child: _ReviewBody(active: active),
     );
   }
 }
@@ -123,8 +125,7 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   void _scrollFilmstripTo(int index) {
     if (!_filmstripController.hasClients) return;
     final viewport = _filmstripController.position.viewportDimension;
-    final offset =
-        (index * _itemExtent) - (viewport / 2 - _itemExtent / 2);
+    final offset = (index * _itemExtent) - (viewport / 2 - _itemExtent / 2);
     _filmstripController.animateTo(
       offset.clamp(0.0, _filmstripController.position.maxScrollExtent),
       duration: const Duration(milliseconds: 200),
@@ -150,54 +151,58 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(cullControllerProvider);
+    final exportWorkflow = ref.watch(exportFileOperationWorkflowProvider);
     final ctrl = ref.read(cullControllerProvider.notifier);
     final size = MediaQuery.sizeOf(context);
     final isWide = size.width >= 720;
+    final folderSelectionEnabled =
+        widget.active &&
+        !state.loading &&
+        !state.exportDestinationPending &&
+        !exportWorkflow.isActive;
 
     // Keep the filmstrip aligned with the current index regardless of what
     // triggered the change (keyboard, swipe, tap, or auto-advance).
     // Also reset the stage transform on index change.
-    ref.listen(
-      cullControllerProvider.select((s) => s.index),
-      (prev, next) {
-        _scrollFilmstripTo(next);
-        _stageKey.currentState?.resetTransform();
-      },
-    );
+    ref.listen(cullControllerProvider.select((s) => s.index), (prev, next) {
+      _scrollFilmstripTo(next);
+      _stageKey.currentState?.resetTransform();
+    });
 
     // Decoded precache for neighbors when index changes.
-    ref.listen(
-      cullControllerProvider.select((s) => s.index),
-      (prev, next) {
-        final pairs = state.pairs;
-        if (pairs.isEmpty) return;
-        final mode = state.mode;
-        // Capture context-dependent values before entering async code.
-        final size = MediaQuery.sizeOf(context);
-        final dpr = MediaQuery.devicePixelRatioOf(context);
-        // Must match the stage's decode width exactly or the precache misses.
-        final cw = _stageCacheWidth.value ?? (size.width * dpr).round();
-        for (final offset in [1, 2, -1]) {
-          final ni = next + offset;
-          if (ni < 0 || ni >= pairs.length) continue;
-          final key = (stem: pairs[ni].stem, mode: mode);
-          ref.read(previewProvider(key).future).then((bytes) {
-            if (bytes == null) return;
-            if (!mounted) return;
-            // ignore: use_build_context_synchronously
-            precacheImage(stageProvider(bytes, cw), context);
-          });
-        }
-      },
-    );
+    ref.listen(cullControllerProvider.select((s) => s.index), (prev, next) {
+      final pairs = state.pairs;
+      if (pairs.isEmpty) return;
+      final mode = state.mode;
+      // Capture context-dependent values before entering async code.
+      final size = MediaQuery.sizeOf(context);
+      final dpr = MediaQuery.devicePixelRatioOf(context);
+      // Must match the stage's decode width exactly or the precache misses.
+      final cw = _stageCacheWidth.value ?? (size.width * dpr).round();
+      for (final offset in [1, 2, -1]) {
+        final ni = next + offset;
+        if (ni < 0 || ni >= pairs.length) continue;
+        final key = (stem: pairs[ni].stem, mode: mode);
+        ref.read(previewProvider(key).future).then((bytes) {
+          if (bytes == null) return;
+          if (!mounted) return;
+          // ignore: use_build_context_synchronously
+          precacheImage(stageProvider(bytes, cw), context);
+        });
+      }
+    });
 
     Future<void> doOpenFolder() async {
+      if (!folderSelectionEnabled) return;
+      final selectionGeneration = ctrl.beginOpenFolderSelection();
+      if (selectionGeneration == null) return;
       final svc = ref.read(filePickServiceProvider);
-      final result = await svc.pickDirectory(
-        title: 'Open photo folder',
-      );
+      final result = await svc.pickDirectory(title: 'Open photo folder');
       if (result.path != null) {
-        await ctrl.openFolder(result.path!);
+        await ctrl.openFolder(
+          result.path!,
+          selectionGeneration: selectionGeneration,
+        );
       }
     }
 
@@ -223,8 +228,27 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
               _TopBar(
                 state: state,
                 isWide: isWide,
-                onOpenFolder: doOpenFolder,
+                onOpenFolder: folderSelectionEnabled ? doOpenFolder : null,
               ),
+
+              if (state.error != null)
+                Semantics(
+                  liveRegion: true,
+                  child: Container(
+                    width: double.infinity,
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    child: Text(
+                      state.error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onErrorContainer,
+                      ),
+                    ),
+                  ),
+                ),
 
               // Main stage
               Expanded(
@@ -233,7 +257,8 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
                   state: state,
                   isWide: isWide,
                   ctrl: ctrl,
-                  onOpenFolder: doOpenFolder,
+                  onOpenFolder: folderSelectionEnabled ? doOpenFolder : null,
+                  dropEnabled: folderSelectionEnabled,
                   showExif: _showExif,
                   cacheWidthSink: _stageCacheWidth,
                 ),
@@ -252,6 +277,10 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
                 state: state,
                 isWide: isWide,
                 ctrl: ctrl,
+                exportEnabled:
+                    !state.loading &&
+                    !state.exportDestinationPending &&
+                    !exportWorkflow.isActive,
                 onShowShortcuts: () => _showShortcutsDialog(context),
               ),
             ],
@@ -410,7 +439,7 @@ class _TopBar extends ConsumerWidget {
 
   final CullState state;
   final bool isWide;
-  final VoidCallback onOpenFolder;
+  final VoidCallback? onOpenFolder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -528,10 +557,7 @@ class _TopBar extends ConsumerWidget {
 /// Compact mode toggle shown at very narrow widths (<400px).
 /// Shows the current mode as text on a small FilledButton.
 class _ModeToggleCompact extends StatelessWidget {
-  const _ModeToggleCompact({
-    required this.mode,
-    required this.onChanged,
-  });
+  const _ModeToggleCompact({required this.mode, required this.onChanged});
 
   final String mode;
   final void Function(String) onChanged;
@@ -597,6 +623,7 @@ class _Stage extends ConsumerStatefulWidget {
     required this.isWide,
     required this.ctrl,
     required this.onOpenFolder,
+    required this.dropEnabled,
     this.showExif = true,
     this.cacheWidthSink,
   });
@@ -604,7 +631,8 @@ class _Stage extends ConsumerStatefulWidget {
   final CullState state;
   final bool isWide;
   final CullController ctrl;
-  final VoidCallback onOpenFolder;
+  final VoidCallback? onOpenFolder;
+  final bool dropEnabled;
   final bool showExif;
 
   /// Reports the decode cacheWidth actually used by the stage so callers can
@@ -654,6 +682,12 @@ class _StageState extends ConsumerState<_Stage>
       duration: const Duration(milliseconds: 150),
     );
     _transformController.addListener(_onTransform);
+  }
+
+  @override
+  void didUpdateWidget(_Stage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.dropEnabled) _dropHovering = false;
   }
 
   void _onTransform() {
@@ -739,10 +773,7 @@ class _StageState extends ConsumerState<_Stage>
     _animation = Matrix4Tween(
       begin: _transformController.value,
       end: target,
-    ).animate(CurvedAnimation(
-      parent: _animController,
-      curve: Curves.easeOut,
-    ));
+    ).animate(CurvedAnimation(parent: _animController, curve: Curves.easeOut));
     _animation!.addListener(() {
       _transformController.value = _animation!.value;
     });
@@ -760,8 +791,10 @@ class _StageState extends ConsumerState<_Stage>
     try {
       final buffer = await ui.ImmutableBuffer.fromUint8List(bytes);
       final descriptor = await ui.ImageDescriptor.encoded(buffer);
-      final size =
-          Size(descriptor.width.toDouble(), descriptor.height.toDouble());
+      final size = Size(
+        descriptor.width.toDouble(),
+        descriptor.height.toDouble(),
+      );
       descriptor.dispose();
       buffer.dispose();
       if (mounted && identical(_sizeResolvedFor, bytes)) {
@@ -830,11 +863,7 @@ class _StageState extends ConsumerState<_Stage>
 
                 // Flag badge
                 if (pair != null && flag != CullFlag.undecided)
-                  Positioned(
-                    top: 12,
-                    left: 16,
-                    child: _FlagBadge(flag: flag),
-                  ),
+                  Positioned(top: 12, left: 16, child: _FlagBadge(flag: flag)),
 
                 // Narrow: swipe (only when un-zoomed) and floating buttons
                 if (!isWide && pair != null && _atRest)
@@ -897,8 +926,7 @@ class _StageState extends ConsumerState<_Stage>
             child: IconButton.filledTonal(
               tooltip: 'Previous (←)',
               icon: const Icon(Icons.chevron_left),
-              onPressed:
-                  state.index > 0 ? () => ctrl.nav(-1) : null,
+              onPressed: state.index > 0 ? () => ctrl.nav(-1) : null,
             ),
           ),
 
@@ -922,8 +950,8 @@ class _StageState extends ConsumerState<_Stage>
               icon: const Icon(Icons.chevron_right),
               onPressed:
                   state.pairs.isNotEmpty && state.index < state.pairs.length - 1
-                      ? () => ctrl.nav(1)
-                      : null,
+                  ? () => ctrl.nav(1)
+                  : null,
             ),
           ),
         ],
@@ -932,14 +960,12 @@ class _StageState extends ConsumerState<_Stage>
       content = Container(
         margin: const EdgeInsets.all(8),
         clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-        ),
+        decoration: BoxDecoration(borderRadius: BorderRadius.circular(12)),
         child: stageWidget,
       );
     }
 
-    if (!_isDesktop) return content;
+    if (!_isDesktop || !widget.dropEnabled) return content;
 
     return Stack(
       children: [
@@ -963,15 +989,16 @@ class _StageState extends ConsumerState<_Stage>
                     width: 2,
                   ),
                   borderRadius: BorderRadius.circular(12),
-                  color: Theme.of(context)
-                      .colorScheme
-                      .primary
-                      .withValues(alpha: 0.08),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.primary.withValues(alpha: 0.08),
                 ),
                 child: Center(
                   child: Container(
                     padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 8),
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
                     decoration: BoxDecoration(
                       color: Colors.black.withValues(alpha: 0.55),
                       borderRadius: BorderRadius.circular(8),
@@ -1019,7 +1046,7 @@ class _StageContent extends ConsumerStatefulWidget {
   final void Function(Offset) onDoubleTapDown;
   final VoidCallback onDoubleTap;
   final void Function(Uint8List) onImageResolved;
-  final VoidCallback onOpenFolder;
+  final VoidCallback? onOpenFolder;
   final bool showExif;
 
   @override
@@ -1048,8 +1075,11 @@ class _StageContentState extends ConsumerState<_StageContent> {
         return Center(
           child: _ResumePrompt(
             savedPath: savedPath,
-            onResume: () =>
-                ref.read(cullControllerProvider.notifier).openFolder(savedPath),
+            onResume: widget.onOpenFolder == null
+                ? null
+                : () => ref
+                      .read(cullControllerProvider.notifier)
+                      .openFolder(savedPath),
             onOpenFolder: widget.onOpenFolder,
           ),
         );
@@ -1083,7 +1113,11 @@ class _StageContentState extends ConsumerState<_StageContent> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(Icons.image_not_supported, color: Colors.white38, size: 48),
+                Icon(
+                  Icons.image_not_supported,
+                  color: Colors.white38,
+                  size: 48,
+                ),
                 SizedBox(height: 8),
                 Text(
                   'No preview available',
@@ -1094,7 +1128,8 @@ class _StageContentState extends ConsumerState<_StageContent> {
           );
         }
 
-        final cacheWidth = (widget.stageWidth * widget.devicePixelRatio).round();
+        final cacheWidth = (widget.stageWidth * widget.devicePixelRatio)
+            .round();
 
         // Use full-res decode when zoomed, bounded decode when at rest.
         final ImageProvider provider = widget.atRest
@@ -1155,9 +1190,9 @@ class _ExifOverlay extends ConsumerWidget {
             ),
             child: Text(
               summary.line,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                color: Colors.white,
-              ),
+              style: Theme.of(
+                context,
+              ).textTheme.labelSmall?.copyWith(color: Colors.white),
             ),
           ),
         );
@@ -1232,10 +1267,7 @@ class _Filmstrip extends ConsumerWidget {
           if (pair.jpg != null) {
             // JPG pair: use engine ImageCache directly (no byte-LRU).
             thumb = Image(
-              image: ResizeImage(
-                FileImage(pair.jpg!),
-                width: 128,
-              ),
+              image: ResizeImage(FileImage(pair.jpg!), width: 128),
               fit: BoxFit.cover,
               gaplessPlayback: true,
               errorBuilder: (ctx, err, st) =>
@@ -1291,8 +1323,10 @@ class _Filmstrip extends ConsumerWidget {
                   child: Container(
                     width: 64,
                     height: 64,
-                    margin:
-                        const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                    margin: const EdgeInsets.symmetric(
+                      horizontal: 2,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       border: Border.all(color: borderColor, width: 2),
                     ),
@@ -1329,12 +1363,14 @@ class _BottomBar extends ConsumerStatefulWidget {
     required this.state,
     required this.isWide,
     required this.ctrl,
+    required this.exportEnabled,
     required this.onShowShortcuts,
   });
 
   final CullState state;
   final bool isWide;
   final CullController ctrl;
+  final bool exportEnabled;
   final VoidCallback onShowShortcuts;
 
   @override
@@ -1343,6 +1379,29 @@ class _BottomBar extends ConsumerStatefulWidget {
 
 class _BottomBarState extends ConsumerState<_BottomBar> {
   bool _includeJpgs = true;
+  bool _exportPickerPending = false;
+  CullExportIntent? _activeExportIntent;
+
+  @override
+  void dispose() {
+    final exportIntent = _activeExportIntent;
+    _activeExportIntent = null;
+    if (exportIntent != null) {
+      widget.ctrl.cancelExportIntent(exportIntent);
+    }
+    super.dispose();
+  }
+
+  bool _releaseExportIntent(CullExportIntent exportIntent) {
+    if (_activeExportIntent != exportIntent) return false;
+    _activeExportIntent = null;
+    return true;
+  }
+
+  void _cancelExportIntent(CullExportIntent exportIntent) {
+    if (!_releaseExportIntent(exportIntent)) return;
+    widget.ctrl.cancelExportIntent(exportIntent);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1352,6 +1411,9 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
     final total = state.pairs.length;
     final decided = state.decidedCount;
     final isNarrow = MediaQuery.sizeOf(context).width < 400;
+    final canPreviewExport =
+        widget.exportEnabled && !_exportPickerPending && state.keptCount > 0;
+    final previewExport = canPreviewExport ? () => _doExport(context) : null;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -1404,7 +1466,7 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
                                 style: theme.textTheme.labelMedium?.copyWith(
                                   color: cs.onSurfaceVariant,
                                   fontFeatures: const [
-                                    ui.FontFeature.tabularFigures()
+                                    ui.FontFeature.tabularFigures(),
                                   ],
                                 ),
                               ),
@@ -1437,7 +1499,9 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
                   FilterChip(
                     label: const Text('+ JPGs'),
                     selected: _includeJpgs,
-                    onSelected: (v) => setState(() => _includeJpgs = v),
+                    onSelected: widget.exportEnabled
+                        ? (v) => setState(() => _includeJpgs = v)
+                        : null,
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     padding: EdgeInsets.zero,
@@ -1445,7 +1509,9 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
                 else if (widget.isWide) ...[
                   Checkbox(
                     value: _includeJpgs,
-                    onChanged: (v) => setState(() => _includeJpgs = v ?? true),
+                    onChanged: widget.exportEnabled
+                        ? (v) => setState(() => _includeJpgs = v ?? true)
+                        : null,
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -1454,7 +1520,9 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
                 ] else ...[
                   Checkbox(
                     value: _includeJpgs,
-                    onChanged: (v) => setState(() => _includeJpgs = v ?? true),
+                    onChanged: widget.exportEnabled
+                        ? (v) => setState(() => _includeJpgs = v ?? true)
+                        : null,
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
@@ -1462,16 +1530,25 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
 
                 const SizedBox(width: 2),
 
-                FilledButton(
-                  onPressed: state.keptCount == 0 ? null : () => _doExport(context),
-                  style: FilledButton.styleFrom(
-                    minimumSize: const Size(60, 32),
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: Text(
-                    widget.isWide ? 'Export Kept →' : 'Export →',
-                    overflow: TextOverflow.ellipsis,
+                Semantics(
+                  container: true,
+                  label: 'Preview Export',
+                  button: true,
+                  enabled: canPreviewExport,
+                  onTap: previewExport,
+                  child: ExcludeSemantics(
+                    child: FilledButton(
+                      onPressed: previewExport,
+                      style: FilledButton.styleFrom(
+                        minimumSize: const Size(60, 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: Text(
+                        widget.isWide ? 'Preview Export →' : 'Preview →',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -1483,37 +1560,75 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
   }
 
   Future<void> _doExport(BuildContext context) async {
+    if (_exportPickerPending || _activeExportIntent != null) return;
+    final exportIntent = widget.ctrl.beginExportIntent();
+    if (exportIntent == null) return;
+    _activeExportIntent = exportIntent;
+    final includeJpgs = _includeJpgs;
     final svc = ref.read(filePickServiceProvider);
-    final result = await svc.pickDirectory(title: 'Export kept photos to…');
-
-    if (!context.mounted) return;
-
-    if (result.warning != null) {
+    setState(() => _exportPickerPending = true);
+    PickResult result;
+    try {
+      result = await svc.pickDirectory(title: 'Export kept photos to…');
+    } on Object {
+      _cancelExportIntent(exportIntent);
+      if (!context.mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(result.warning!)),
+        const SnackBar(
+          content: Text(
+            'The destination chooser could not be opened. No files were changed.',
+          ),
+        ),
       );
+      return;
+    } finally {
+      if (mounted) setState(() => _exportPickerPending = false);
+    }
+
+    if (!context.mounted) {
+      _cancelExportIntent(exportIntent);
       return;
     }
 
-    if (result.path == null) return;
+    if (result.warning != null) {
+      _cancelExportIntent(exportIntent);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(result.warning!)));
+      return;
+    }
+
+    if (result.path == null) {
+      _cancelExportIntent(exportIntent);
+      return;
+    }
+    if (!widget.ctrl.isExportIntentCurrent(exportIntent)) {
+      _cancelExportIntent(exportIntent);
+      return;
+    }
+    if (!_releaseExportIntent(exportIntent)) return;
 
     try {
-      final exportResult = await widget.ctrl.export(
+      final preparation = widget.ctrl.prepareExport(
         destinationPath: result.path!,
-        includeJpgs: _includeJpgs,
+        includeJpgs: includeJpgs,
+        exportIntent: exportIntent,
       );
-
+      await showFileOperationDialog(
+        context: context,
+        workflowProvider: exportFileOperationWorkflowProvider,
+        title: 'Review export changes',
+        preparation: preparation,
+      );
+      await preparation;
+    } on Object {
       if (!context.mounted) return;
-      final basename = p.basename(exportResult.outputPath);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Copied ${exportResult.copied} files → $basename'),
+        const SnackBar(
+          content: Text(
+            'The export preview could not be opened. No files were changed.',
+          ),
         ),
-      );
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Export failed: $e')),
       );
     }
   }
@@ -1564,8 +1679,8 @@ class _ResumePrompt extends ConsumerWidget {
   });
 
   final String savedPath;
-  final VoidCallback onResume;
-  final VoidCallback onOpenFolder;
+  final VoidCallback? onResume;
+  final VoidCallback? onOpenFolder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

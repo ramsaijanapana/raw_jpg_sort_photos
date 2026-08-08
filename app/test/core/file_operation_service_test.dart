@@ -2332,6 +2332,116 @@ void main() {
   );
 
   test(
+    'progress observer reports each appended preflight and cancelled result once',
+    () async {
+      final platform = _ControlledPlatform()
+        ..addFile(path('source/blocked.arw'), 'blocked')
+        ..addFile(path('source/second.arw'), 'second')
+        ..addFile(path('source/third.arw'), 'third')
+        ..addFile(path('destination/blocked.arw'), 'existing');
+      final plan = await planFileOperations(
+        platform: platform,
+        buildOperations: (access) async {
+          final operations = <FileOperation>[];
+          for (final name in ['blocked.arw', 'second.arw', 'third.arw']) {
+            operations.add(
+              FileOperation.create(
+                source: await platform.resolveFile(
+                  access,
+                  selection(path('source/$name')),
+                ),
+                destination: await platform.resolveFile(
+                  access,
+                  selection(path('destination/$name')),
+                ),
+                intent: FileOperationIntent.copy,
+              ),
+            );
+          }
+          return operations;
+        },
+      );
+      var cancelled = false;
+      final observations =
+          <({FileOperationStatus status, int completed, int total})>[];
+
+      final execution = await executeFileOperationPlan(
+        plan,
+        approval: FileOperationApproval.forPlan(plan),
+        platform: platform,
+        shouldCancel: () => cancelled,
+        onResult: (result, completed, total) {
+          observations.add((
+            status: result.status,
+            completed: completed,
+            total: total,
+          ));
+          if (completed == 1) cancelled = true;
+        },
+      );
+
+      expect(execution.results.map((result) => result.status), [
+        FileOperationStatus.skippedConflict,
+        FileOperationStatus.cancelled,
+        FileOperationStatus.cancelled,
+      ]);
+      expect(observations, [
+        (status: FileOperationStatus.skippedConflict, completed: 1, total: 3),
+        (status: FileOperationStatus.cancelled, completed: 2, total: 3),
+        (status: FileOperationStatus.cancelled, completed: 3, total: 3),
+      ]);
+      expect(platform.beginCount, 0);
+    },
+  );
+
+  test('progress observer failure cannot interrupt execution', () async {
+    final platform = _ControlledPlatform()
+      ..addFile(path('source/first.arw'), 'first')
+      ..addFile(path('source/second.arw'), 'second');
+    final plan = await planFileOperations(
+      platform: platform,
+      buildOperations: (access) async {
+        final operations = <FileOperation>[];
+        for (final name in ['first.arw', 'second.arw']) {
+          operations.add(
+            FileOperation.create(
+              source: await platform.resolveFile(
+                access,
+                selection(path('source/$name')),
+              ),
+              destination: await platform.resolveFile(
+                access,
+                selection(path('destination/$name')),
+              ),
+              intent: FileOperationIntent.copy,
+            ),
+          );
+        }
+        return operations;
+      },
+    );
+    var observationCount = 0;
+
+    final execution = await executeFileOperationPlan(
+      plan,
+      approval: FileOperationApproval.forPlan(plan),
+      platform: platform,
+      onResult: (_, _, _) {
+        observationCount++;
+        throw StateError('observer failure must be isolated');
+      },
+    );
+
+    expect(execution.results.map((result) => result.status), [
+      FileOperationStatus.copied,
+      FileOperationStatus.copied,
+    ]);
+    expect(observationCount, 2);
+    expect(platform.contents(path('destination/first.arw')), 'first');
+    expect(platform.contents(path('destination/second.arw')), 'second');
+  });
+
+  test(
     'one-shot inner cancellation latches the batch from a cancellation issue',
     () async {
       final platform = _ControlledPlatform(tempCleanupFails: true)

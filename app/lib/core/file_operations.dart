@@ -1319,18 +1319,31 @@ Future<FileOperationExecution> executeFileOperationPlan(
   required FileOperationApproval approval,
   FileOperationPlatform platform = const DartFileOperationPlatform(),
   bool Function()? shouldCancel,
+  void Function(FileOperationResult result, int completed, int total)? onResult,
 }) async {
   // This synchronous claim is deliberately before the first await or provider
   // access, so one approval can never start two executions.
   approval.claim(plan);
 
   final results = <FileOperationResult>[];
+  void reportResult(FileOperationResult result) {
+    try {
+      onResult?.call(result, results.length, plan.operations.length);
+    } on Object {
+      // Progress is observational. A broken observer must never change which
+      // approved file operations execute or how cancellation is reported.
+    }
+  }
+
   for (var index = 0; index < plan.operations.length; index++) {
     if (shouldCancel?.call() ?? false) {
       for (final operation in plan.operations.skip(index)) {
-        results.add(
-          _notExecutedResult(operation, FileOperationStatus.cancelled),
+        final result = _notExecutedResult(
+          operation,
+          FileOperationStatus.cancelled,
         );
+        results.add(result);
+        reportResult(result);
       }
       break;
     }
@@ -1343,6 +1356,7 @@ Future<FileOperationExecution> executeFileOperationPlan(
             shouldCancel: shouldCancel,
           );
     results.add(result);
+    reportResult(result);
     final cancellationWasReported =
         result.status == FileOperationStatus.cancelled ||
         result.issues.any(
@@ -1350,9 +1364,12 @@ Future<FileOperationExecution> executeFileOperationPlan(
         );
     if (cancellationWasReported) {
       for (final remaining in plan.operations.skip(index + 1)) {
-        results.add(
-          _notExecutedResult(remaining, FileOperationStatus.cancelled),
+        final result = _notExecutedResult(
+          remaining,
+          FileOperationStatus.cancelled,
         );
+        results.add(result);
+        reportResult(result);
       }
       break;
     }

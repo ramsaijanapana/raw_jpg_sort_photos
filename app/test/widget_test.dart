@@ -11,13 +11,16 @@ import 'package:photo_sorter/core/models.dart';
 import 'package:photo_sorter/main.dart';
 import 'package:photo_sorter/services/prefs_service.dart';
 import 'package:photo_sorter/state/cull_controller.dart';
+import 'package:photo_sorter/ui/review/review_screen.dart';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Returns a [PrefsService] backed by mock SharedPreferences.
-Future<PrefsService> makeMockPrefs([Map<String, Object> initial = const {}]) async {
+Future<PrefsService> makeMockPrefs([
+  Map<String, Object> initial = const {},
+]) async {
   SharedPreferences.setMockInitialValues(initial);
   final prefs = await SharedPreferences.getInstance();
   return PrefsService(prefs);
@@ -30,8 +33,7 @@ Future<void> pumpApp(
   PrefsService? prefs,
 ]) async {
   prefs ??= await makeMockPrefs();
-  tester.view.physicalSize =
-      logicalSize * tester.view.devicePixelRatio;
+  tester.view.physicalSize = logicalSize * tester.view.devicePixelRatio;
   await tester.pumpWidget(
     ProviderScope(
       overrides: [prefsServiceProvider.overrideWithValue(prefs)],
@@ -56,8 +58,9 @@ void main() {
   });
 
   // 1. App renders shell with Sort + Review destinations.
-  testWidgets('wide: shell shows Sort and Review in NavigationRail',
-      (tester) async {
+  testWidgets('wide: shell shows Sort and Review in NavigationRail', (
+    tester,
+  ) async {
     await pumpApp(tester, const Size(1100, 760));
 
     // NavigationRail is present at wide widths.
@@ -66,16 +69,17 @@ void main() {
     expect(find.text('Review'), findsWidgets);
   });
 
-  // 2. Sort screen: Sort Photos button exists; no folder → error card on tap.
-  testWidgets('sort screen: button exists, tapping without folder shows error',
-      (tester) async {
+  // 2. Sort screen: preview button exists and is disabled without a folder.
+  testWidgets('sort screen: preview button is disabled without a folder', (
+    tester,
+  ) async {
     await pumpApp(tester, const Size(1100, 760));
 
     // The Sort tab should be visible by default.
     expect(find.text('Sort Photos'), findsWidgets);
 
-    // The FilledButton "Sort Photos" should be disabled (no input chosen).
-    final btn = find.widgetWithText(FilledButton, 'Sort Photos');
+    // Preview cannot begin until an input folder has been selected.
+    final btn = find.widgetWithText(FilledButton, 'Preview Sort');
     expect(btn, findsOneWidget);
 
     // Button is disabled (onPressed == null) until a folder is picked.
@@ -92,10 +96,7 @@ void main() {
     await tester.tap(find.text('Review').last);
     await tester.pumpAndSettle();
 
-    expect(
-      find.text('Open a folder to start reviewing'),
-      findsOneWidget,
-    );
+    expect(find.text('Open a folder to start reviewing'), findsOneWidget);
   });
 
   // 4. Narrow width shows NavigationBar, wide shows NavigationRail.
@@ -106,8 +107,9 @@ void main() {
     expect(find.byType(NavigationRail), findsNothing);
   });
 
-  testWidgets('wide width shows NavigationRail not NavigationBar',
-      (tester) async {
+  testWidgets('wide width shows NavigationRail not NavigationBar', (
+    tester,
+  ) async {
     await pumpApp(tester, const Size(1100, 760));
 
     expect(find.byType(NavigationRail), findsOneWidget);
@@ -117,8 +119,9 @@ void main() {
   // 5. Keyboard shortcuts reach the review screen through real key events.
   // Regression test: shortcuts were dead because the page lives in an
   // IndexedStack and the Focus/CallbackShortcuts nesting was inverted.
-  testWidgets('review screen: arrow keys navigate, K/X flag photos',
-      (tester) async {
+  testWidgets('review screen: arrow keys navigate, K/X flag photos', (
+    tester,
+  ) async {
     // Sync I/O: async file futures never complete in the fake-async zone.
     final tmp = Directory.systemTemp.createTempSync('key_test_');
     addTearDown(() => tmp.deleteSync(recursive: true));
@@ -148,9 +151,8 @@ void main() {
     await tester.tap(find.text('Review').last);
     await tester.pump(const Duration(milliseconds: 100));
     await tester.runAsync(
-      () => container.read(cullControllerProvider.notifier).openFolder(
-            tmp.path,
-          ),
+      () =>
+          container.read(cullControllerProvider.notifier).openFolder(tmp.path),
     );
     await tester.pump(const Duration(milliseconds: 100));
 
@@ -161,8 +163,10 @@ void main() {
 
     await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
     await tester.pump(const Duration(milliseconds: 300));
-    expect(container.read(cullControllerProvider).flags['IMG_002'],
-        CullFlag.keep);
+    expect(
+      container.read(cullControllerProvider).flags['IMG_002'],
+      CullFlag.keep,
+    );
 
     await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
     await tester.pump(const Duration(milliseconds: 300));
@@ -177,9 +181,129 @@ void main() {
     );
   });
 
+  testWidgets(
+    'review shortcuts stay inactive after AppShell back switches to Sort',
+    (tester) async {
+      final tmp = Directory.systemTemp.createTempSync(
+        'hidden_review_shortcuts_',
+      );
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      for (final name in ['IMG_001.ARW', 'IMG_002.ARW', 'IMG_003.ARW']) {
+        File(p.join(tmp.path, name)).writeAsBytesSync([0, 1, 2, 3]);
+      }
+
+      tester.view.physicalSize =
+          const Size(1100, 760) * tester.view.devicePixelRatio;
+      final prefs = await makeMockPrefs();
+      final container = ProviderContainer(
+        overrides: [prefsServiceProvider.overrideWithValue(prefs)],
+      );
+      addTearDown(container.dispose);
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const PhotoSorterApp(),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Review').last);
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.runAsync(
+        () => container
+            .read(cullControllerProvider.notifier)
+            .openFolder(tmp.path),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(await tester.binding.handlePopRoute(), isTrue);
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('Sort Photos'), findsOneWidget);
+
+      final controller = container.read(cullControllerProvider.notifier);
+      final sessionFile = File(p.join(tmp.path, 'cull_session.json'));
+
+      Future<void> expectHiddenShortcutIgnored(LogicalKeyboardKey key) async {
+        final before = container.read(cullControllerProvider);
+        final beforeFlags = Map<String, CullFlag>.from(before.flags);
+        final beforeIndex = before.index;
+        final beforeSession = sessionFile.readAsStringSync();
+        await tester.sendKeyEvent(key);
+        await tester.pump(const Duration(milliseconds: 300));
+        final after = container.read(cullControllerProvider);
+        expect(after.flags, beforeFlags, reason: key.keyLabel);
+        expect(after.index, beforeIndex, reason: key.keyLabel);
+        final afterSession = await tester.runAsync(() async {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          return sessionFile.readAsString();
+        });
+        expect(afterSession, beforeSession, reason: key.keyLabel);
+      }
+
+      controller.goto(1);
+      await tester.runAsync(() => controller.skip());
+      controller.goto(1);
+      await expectHiddenShortcutIgnored(LogicalKeyboardKey.keyK);
+
+      await tester.runAsync(() => controller.keep());
+      controller.goto(1);
+      await expectHiddenShortcutIgnored(LogicalKeyboardKey.keyX);
+      await expectHiddenShortcutIgnored(LogicalKeyboardKey.keyU);
+
+      controller.goto(0);
+      await tester.runAsync(() => controller.keep());
+      controller.goto(1);
+      await expectHiddenShortcutIgnored(LogicalKeyboardKey.keyZ);
+
+      await tester.tap(find.text('Review').last);
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyX);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        container.read(cullControllerProvider).flags['IMG_002'],
+        CullFlag.skip,
+      );
+    },
+  );
+
+  testWidgets('an inactive ReviewScreen cannot acquire shortcut focus', (
+    tester,
+  ) async {
+    final tmp = Directory.systemTemp.createTempSync(
+      'inactive_review_shortcuts_',
+    );
+    addTearDown(() => tmp.deleteSync(recursive: true));
+    File(p.join(tmp.path, 'IMG_001.ARW')).writeAsBytesSync([0, 1, 2, 3]);
+    final container = ProviderContainer(
+      overrides: [
+        prefsServiceProvider.overrideWithValue(await makeMockPrefs()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.runAsync(
+      () =>
+          container.read(cullControllerProvider.notifier).openFolder(tmp.path),
+    );
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: ReviewScreen(active: false)),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyK);
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final state = container.read(cullControllerProvider);
+    expect(state.flags, isEmpty);
+    expect(state.index, 0);
+  });
+
   // 5b. Narrow review top bar must not overflow at 360px logical width.
-  testWidgets('review top bar fits at 360px with a folder open (P1-1)',
-      (tester) async {
+  testWidgets('review top bar fits at 360px with a folder open (P1-1)', (
+    tester,
+  ) async {
     final tmp = Directory.systemTemp.createTempSync('narrow_topbar_');
     addTearDown(() => tmp.deleteSync(recursive: true));
     // A long stem to stress the filename Text in the top bar.
@@ -209,17 +333,29 @@ void main() {
     await tester.tap(find.text('Review').last);
     await tester.pump(const Duration(milliseconds: 100));
     await tester.runAsync(
-      () => container.read(cullControllerProvider.notifier).openFolder(tmp.path),
+      () =>
+          container.read(cullControllerProvider.notifier).openFolder(tmp.path),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(
+      () => container.read(cullControllerProvider.notifier).keep(),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(find.text('Preview →'), findsOneWidget);
+    final semantics = tester.ensureSemantics();
+    try {
+      expect(find.bySemanticsLabel('Preview Export'), findsOneWidget);
+    } finally {
+      semantics.dispose();
+    }
 
     // No RenderFlex overflow (or any other) exception should have been thrown.
     expect(tester.takeException(), isNull);
   });
 
   // 6. End-to-end-ish: openFolder, keep/skip, session written.
-  test('cull_controller: openFolder, keep, skip, session file written',
-      () async {
+  test('cull_controller: openFolder, keep, skip, session file written', () async {
     // Create a temp dir with fake .ARW and .JPG files.
     final tmp = await Directory.systemTemp.createTemp('widget_test_');
     try {
@@ -243,8 +379,10 @@ void main() {
       var state = container.read(cullControllerProvider);
 
       expect(state.pairs.length, 2);
-      expect(state.pairs.map((p) => p.stem).toList(),
-          containsAll(['IMG_001', 'IMG_002']));
+      expect(
+        state.pairs.map((p) => p.stem).toList(),
+        containsAll(['IMG_001', 'IMG_002']),
+      );
       expect(state.index, 0);
 
       // Keep first photo
@@ -262,8 +400,7 @@ void main() {
 
       // Session file should be written
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      final sessionFile =
-          File(p.join(tmp.path, 'cull_session.json'));
+      final sessionFile = File(p.join(tmp.path, 'cull_session.json'));
       expect(await sessionFile.exists(), isTrue);
       final content = await sessionFile.readAsString();
       expect(content, contains('"IMG_001":"keep"'));

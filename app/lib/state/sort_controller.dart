@@ -1,11 +1,11 @@
-import 'dart:io';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/file_operations.dart';
 import '../core/models.dart';
 import '../core/sorter.dart';
 import '../services/file_pick_service.dart';
 import '../services/prefs_service.dart';
+import 'file_operation_workflow.dart';
 
 // ---------------------------------------------------------------------------
 // State
@@ -40,12 +40,13 @@ class SortUiState {
   }) {
     return SortUiState(
       phase: phase ?? this.phase,
-      inputPath:
-          inputPath == _sentinel ? this.inputPath : inputPath as String?,
-      outputPath:
-          outputPath == _sentinel ? this.outputPath : outputPath as String?,
-      progress:
-          progress == _sentinel ? this.progress : progress as SortProgress?,
+      inputPath: inputPath == _sentinel ? this.inputPath : inputPath as String?,
+      outputPath: outputPath == _sentinel
+          ? this.outputPath
+          : outputPath as String?,
+      progress: progress == _sentinel
+          ? this.progress
+          : progress as SortProgress?,
       result: result == _sentinel ? this.result : result as SortResult?,
       message: message == _sentinel ? this.message : message as String?,
     );
@@ -59,7 +60,7 @@ class SortUiState {
 // ---------------------------------------------------------------------------
 
 class SortController extends Notifier<SortUiState> {
-  bool _cancelRequested = false;
+  int _selectionGeneration = 0;
 
   @override
   SortUiState build() {
@@ -71,6 +72,19 @@ class SortController extends Notifier<SortUiState> {
 
   /// Sets the input folder directly (bypasses file picker) and persists it.
   Future<void> setInput(String path) async {
+    if (!_selectionCanChange) return;
+    final selectionGeneration = ++_selectionGeneration;
+    await _applyInput(path, selectionGeneration: selectionGeneration);
+  }
+
+  Future<void> _applyInput(
+    String path, {
+    required int selectionGeneration,
+  }) async {
+    if (!_selectionCanChange || selectionGeneration != _selectionGeneration) {
+      return;
+    }
+    ref.read(sortFileOperationWorkflowProvider.notifier).discard();
     state = state.copyWith(
       inputPath: path,
       outputPath: null,
@@ -87,55 +101,49 @@ class SortController extends Notifier<SortUiState> {
 
   /// Cancels an in-progress sort.
   void cancel() {
-    _cancelRequested = true;
+    ref.read(sortFileOperationWorkflowProvider.notifier).cancel();
   }
 
   Future<void> pickInput() async {
+    if (!_selectionCanChange) return;
+    final selectionGeneration = ++_selectionGeneration;
     final result = await ref
         .read(filePickServiceProvider)
         .pickDirectory(title: 'Choose photo folder');
+    if (!_selectionCanChange || selectionGeneration != _selectionGeneration) {
+      return;
+    }
     if (result.warning != null) {
-      state = state.copyWith(
-        phase: SortPhase.error,
-        message: result.warning,
-      );
+      state = state.copyWith(phase: SortPhase.error, message: result.warning);
       return;
     }
     if (result.path != null) {
-      state = state.copyWith(
-        inputPath: result.path,
-        // Reset output and result when a new input is chosen.
-        outputPath: null,
-        result: null,
-        message: null,
-        phase: SortPhase.idle,
-      );
-      // Persist for next session.
-      try {
-        await ref.read(prefsServiceProvider).setLastSortInput(result.path!);
-      } catch (_) {
-        // Prefs failure is non-fatal.
-      }
+      await _applyInput(result.path!, selectionGeneration: selectionGeneration);
     }
   }
 
   Future<void> pickOutput() async {
+    if (!_selectionCanChange) return;
+    final selectionGeneration = ++_selectionGeneration;
     final result = await ref
         .read(filePickServiceProvider)
         .pickDirectory(title: 'Choose output folder');
+    if (!_selectionCanChange || selectionGeneration != _selectionGeneration) {
+      return;
+    }
     if (result.warning != null) {
-      state = state.copyWith(
-        phase: SortPhase.error,
-        message: result.warning,
-      );
+      state = state.copyWith(phase: SortPhase.error, message: result.warning);
       return;
     }
     if (result.path != null) {
+      ref.read(sortFileOperationWorkflowProvider.notifier).discard();
       state = state.copyWith(outputPath: result.path);
     }
   }
 
-  Future<void> start() async {
+  Future<void> prepareSort() async {
+    if (!_selectionCanChange) return;
+    _selectionGeneration++;
     final inputPath = state.inputPath;
     if (inputPath == null) {
       state = state.copyWith(
@@ -145,59 +153,33 @@ class SortController extends Notifier<SortUiState> {
       return;
     }
 
-    final inputDir = Directory(inputPath);
-    final outputDir = Directory(state.outputPath ?? inputPath);
-
-    _cancelRequested = false;
+    final outputPath = state.outputPath ?? inputPath;
     state = state.copyWith(
-      phase: SortPhase.sorting,
+      phase: SortPhase.idle,
       progress: null,
       result: null,
       message: null,
     );
+    await ref
+        .read(sortFileOperationWorkflowProvider.notifier)
+        .prepare(
+          (platform) => planSortPhotos(
+            input: DartFileProviderSelection.fromPath(inputPath),
+            output: DartFileProviderSelection.fromPath(outputPath),
+            platform: platform,
+          ),
+        );
+  }
 
-    try {
-      final result = await sortPhotos(
-        input: inputDir,
-        output: outputDir,
-        onProgress: (p) {
-          state = state.copyWith(phase: SortPhase.sorting, progress: p);
-        },
-        shouldCancel: () => _cancelRequested,
-      );
+  /// Compatibility entry point while callers migrate to the preview wording.
+  Future<void> start() => prepareSort();
 
-      if (result.cancelled) {
-        final total = (result.rawCount + result.jpgCount + result.skipped);
-        state = state.copyWith(
-          phase: SortPhase.cancelled,
-          result: result,
-          progress: null,
-          message: 'Stopped after $total of ${state.progress?.total ?? total} files — files already sorted stay in place.',
-        );
-      } else if (result.rawCount == 0 && result.jpgCount == 0) {
-        state = state.copyWith(
-          phase: SortPhase.empty,
-          result: result,
-          progress: null,
-          message:
-              'No RAW or JPG files found in the selected folder.',
-        );
-      } else {
-        state = state.copyWith(
-          phase: SortPhase.done,
-          result: result,
-          progress: null,
-        );
-      }
-    } catch (e) {
-      state = state.copyWith(
-        phase: SortPhase.error,
-        progress: null,
-        message: 'Sort failed: $e',
-      );
-    }
+  bool get _selectionCanChange {
+    final workflow = ref.read(sortFileOperationWorkflowProvider);
+    return !workflow.isActive;
   }
 }
 
-final sortControllerProvider =
-    NotifierProvider<SortController, SortUiState>(SortController.new);
+final sortControllerProvider = NotifierProvider<SortController, SortUiState>(
+  SortController.new,
+);
