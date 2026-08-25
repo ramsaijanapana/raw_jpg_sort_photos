@@ -1,0 +1,21 @@
+# Photo Sorter Android release signing template.
+#
+# Copy this file to key.properties in this same directory and fill in real
+# values. Do not commit key.properties or any *.jks / *.keystore file — those
+# sibling names are already listed in .gitignore.
+#
+# Precedence: PHOTO_SORTER_ANDROID_* environment variables override the matching
+# keys below. Relative storeFile paths resolve from this directory (the Android
+# Gradle root, app/android). Use forward slashes so paths with spaces work
+# (example: /Users/you/My Keys/upload-keystore.jks).
+#
+# Required keys:
+#   storeFile      PHOTO_SORTER_ANDROID_STORE_FILE
+#   storePassword  PHOTO_SORTER_ANDROID_STORE_PASSWORD
+#   keyAlias       PHOTO_SORTER_ANDROID_KEY_ALIAS
+#   keyPassword    PHOTO_SORTER_ANDROID_KEY_PASSWORD
+
+storeFile=
+storePassword=
+keyAlias=
+keyPassword=

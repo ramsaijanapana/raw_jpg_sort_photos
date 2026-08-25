@@ -70,11 +70,22 @@ Release builds:
 flutter build linux      # Linux desktop
 flutter build windows    # Windows
 flutter build macos      # macOS
-flutter build apk        # Android
+flutter build apk --debug    # Android debug/dev APK (debug keystore; not for store upload)
+flutter build apk            # Android signed release APK — requires credentials (see below)
 flutter build ios        # iOS (requires Xcode + signing)
 ```
 
-CI builds all five targets on every push and publishes downloadable artifacts (Linux tar.gz, Windows folder, macOS .app zip, Android APK) — see the Actions tab.
+CI builds Linux, Windows, macOS, Android, and iOS on push/PR and publishes Linux tar.gz, Windows folder, and macOS .app zip artifacts. The Android job still runs `flutter build apk --release` and does **not** inject signing secrets, so that job fails closed until `PHOTO_SORTER_ANDROID_*` credentials are provided externally. Do not treat a CI Android APK as store-uploadable or Play-ready.
+
+### Android release signing
+
+Debug and profile builds (`flutter run`, `flutter build apk --debug`) stay on the debug keystore and need no release secrets. They are local/dev artifacts only.
+
+A store-uploadable Android release APK or AAB is produced only when all four values are nonblank **and** `storeFile` resolves to an existing regular file. This is not a Play Console / listing / identity setup, and it does not make the app Play-ready.
+
+**Local:** copy `app/android/key.properties.example` to ignored `app/android/key.properties` and set `storeFile`, `storePassword`, `keyAlias`, and `keyPassword`. Relative `storeFile` paths resolve from `app/android`. Use forward slashes (paths with spaces are fine).
+
+**CI / env:** `PHOTO_SORTER_ANDROID_STORE_FILE`, `PHOTO_SORTER_ANDROID_STORE_PASSWORD`, `PHOTO_SORTER_ANDROID_KEY_ALIAS`, and `PHOTO_SORTER_ANDROID_KEY_PASSWORD` override the matching `key.properties` keys. A release Gradle task (`assembleRelease`, `bundleRelease`, `packageRelease`, or any task name containing `release`) without a complete usable config fails during configuration and names only the missing keys.
 
 ### Mobile notes
 
