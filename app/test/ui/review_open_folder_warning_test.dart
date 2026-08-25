@@ -19,6 +19,7 @@ class _WarningPickService extends FilePickService {
   static const DirectoryPickResult _inaccessible = (
     path: null,
     warning: directoryAccessWarning,
+    folder: null,
   );
 
   @override

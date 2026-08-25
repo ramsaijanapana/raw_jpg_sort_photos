@@ -2,10 +2,19 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/folder_ref.dart';
 import 'local_path_classifier.dart';
 
 /// Result of a directory pick operation.
-typedef DirectoryPickResult = ({String? path, String? warning});
+///
+/// [path] and [warning] keep the Task 03 contract. [folder] is additive:
+/// [LocalFolder] on a usable local path, otherwise null. Android SAF is
+/// not interpreted here.
+typedef DirectoryPickResult = ({
+  String? path,
+  String? warning,
+  FolderRef? folder,
+});
 
 /// Back-compat alias used by existing call sites.
 typedef PickResult = DirectoryPickResult;
@@ -18,15 +27,18 @@ const directoryAccessWarning =
 const DirectoryPickResult _inaccessible = (
   path: null,
   warning: directoryAccessWarning,
+  folder: null,
 );
 
 /// Resolves a picker string for input, output, review, and export.
 ///
-/// Cancelled picks return a null path and null warning. Rejected or
-/// unlistable locations return [directoryAccessWarning] and leave callers
-/// to keep their existing state.
+/// Cancelled picks return a null path, null warning, and null folder.
+/// Rejected or unlistable locations return [directoryAccessWarning] and
+/// leave callers to keep their existing state.
 Future<DirectoryPickResult> interpretPickedDirectory(String? picked) async {
-  if (picked == null) return (path: null, warning: null);
+  if (picked == null) {
+    return (path: null, warning: null, folder: null);
+  }
 
   final localPath = classifyLocalDirectoryPath(picked);
   if (localPath == null) return _inaccessible;
@@ -43,7 +55,11 @@ Future<DirectoryPickResult> interpretPickedDirectory(String? picked) async {
     return _inaccessible;
   }
 
-  return (path: localPath, warning: null);
+  return (
+    path: localPath,
+    warning: null,
+    folder: LocalFolder(localPath),
+  );
 }
 
 /// Service for picking directories via the OS file dialog.
