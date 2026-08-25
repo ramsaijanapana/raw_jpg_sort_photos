@@ -1,42 +1,107 @@
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math';
 import 'dart:typed_data';
+
+import '../storage/byte_range_reader.dart';
 import 'jpeg_scan.dart';
 import 'tiff_ifd.dart';
 
-/// Extracts a JPEG preview from [rawFile] in a background isolate.
+/// Extracts a JPEG preview from a local [File] or a [ByteRangeReader].
 ///
-/// The actual extraction is pure Dart (no dart:ui), so it is safe to run in
-/// a separate isolate via [Isolate.run].
-Future<Uint8List?> extractPreview(File rawFile) {
-  final path = rawFile.path;
-  return Isolate.run(() => _extractPreviewImpl(File(path)));
+/// Ranged TIFF/RAF I/O runs against the reader on the calling isolate.
+/// Isolate work receives either a [Uint8List] or a materialized cache [File];
+/// a caller [File] path is not the isolate API.
+Future<Uint8List?> extractPreview(
+  Object source, {
+  String? extension,
+  String? name,
+}) async {
+  late final ByteRangeReader reader;
+  var resolvedName = name;
+  if (source is File) {
+    reader = IoByteRangeReader.fromFile(source);
+    resolvedName ??= source.path;
+  } else if (source is ByteRangeReader) {
+    reader = source;
+  } else {
+    throw ArgumentError.value(
+      source,
+      'source',
+      'expected File or ByteRangeReader',
+    );
+  }
+  return _extractPreviewFromReader(
+    reader,
+    extension: extension,
+    name: resolvedName,
+  );
 }
 
-/// The actual extraction logic — runs in the isolate spawned by [extractPreview].
-Future<Uint8List?> _extractPreviewImpl(File rawFile) async {
-  final ext = _extensionOf(rawFile.path).toLowerCase();
+Future<Uint8List?> _extractPreviewFromReader(
+  ByteRangeReader reader, {
+  String? extension,
+  String? name,
+}) async {
+  final ext = _resolveExtension(extension, name ?? _nameOf(reader));
 
   if (ext == '.raf') {
-    final ranged = await _extractRafRanged(rawFile);
+    final ranged = await _extractRafRanged(reader);
     if (ranged != null) return ranged;
-    return _fullFallback(rawFile, ext);
+    return _fullFallback(reader, ext);
   }
 
   if (ext == '.cr3') {
-    // BMFF box walking needs the whole file; full read is acceptable.
-    return _fullFallback(rawFile, ext);
+    // BMFF box walking needs the whole file; full read or cache is acceptable.
+    return _fullFallback(reader, ext);
   }
 
   // TIFF-based formats: ARW, CR2, NEF, ORF, DNG, RW2, PEF, SRW.
-  final ranged = await _extractTiffRanged(rawFile);
+  final ranged = await _extractTiffRanged(reader);
   if (ranged != null) return ranged;
-  return _fullFallback(rawFile, ext);
+  return _fullFallback(reader, ext);
 }
 
-Future<Uint8List?> _fullFallback(File rawFile, String ext) async {
-  final bytes = await rawFile.readAsBytes();
-  return extractPreviewBytes(bytes, ext);
+String? _nameOf(ByteRangeReader reader) {
+  if (reader is IoByteRangeReader) return reader.displayName;
+  if (reader is GatewayByteRangeReader) return reader.entry.name;
+  return null;
+}
+
+String _resolveExtension(String? extension, String? name) {
+  if (extension != null && extension.isNotEmpty) {
+    final e = extension.toLowerCase();
+    return e.startsWith('.') ? e : '.$e';
+  }
+  if (name == null || name.isEmpty) return '';
+  return _extensionOf(name).toLowerCase();
+}
+
+Future<Uint8List?> _fullFallback(ByteRangeReader reader, String ext) async {
+  if (reader is CacheMaterializingByteRangeReader) {
+    String? cachePath;
+    try {
+      cachePath = await reader.materializeToCache();
+    } catch (_) {
+      cachePath = null;
+    }
+    if (cachePath != null) {
+      try {
+        assertSafeLocalPath(cachePath);
+        final path = cachePath;
+        return await Isolate.run(() {
+          final bytes = File(path).readAsBytesSync();
+          return extractPreviewBytes(bytes, ext);
+        });
+      } finally {
+        try {
+          await reader.deleteCache(cachePath);
+        } catch (_) {}
+      }
+    }
+  }
+  final bytes = await reader.readAll();
+  return Isolate.run(() => extractPreviewBytes(bytes, ext));
 }
 
 /// Extracts a JPEG preview from [bytes] for a file with the given [extension].
@@ -79,39 +144,31 @@ const int _smallPreviewThreshold = 65536;
 const int _tiffHeaderReadSize = 512 * 1024;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Ranged (RandomAccessFile) extraction
+// Ranged (ByteRangeReader) extraction
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Reads only the declared RAF preview slice without loading the whole file.
 ///
 /// Returns null on any structural problem; the caller then falls back to a
-/// full read.
-Future<Uint8List?> _extractRafRanged(File rawFile) async {
-  RandomAccessFile? raf;
+/// full read. Does not call [ByteRangeReader.readAll].
+Future<Uint8List?> _extractRafRanged(ByteRangeReader reader) async {
   try {
-    raf = await rawFile.open();
-    final fileLength = await raf.length();
+    final fileLength = await reader.length();
     if (fileLength < 92) return null;
 
-    await raf.setPosition(0);
-    final header = await raf.read(92);
+    final header = await reader.read(0, 92);
     if (header.length < 92) return null;
 
     final offset = _readU32Be(header, 84);
     final length = _readU32Be(header, 88);
 
     if (offset == 0 || length == 0) return null;
-    if (offset < 0 || length < 0) return null;
-    if (offset + length > fileLength) return null;
+    if (_rangePastEof(offset, length, fileLength)) return null;
 
-    await raf.setPosition(offset);
-    final slice = await raf.read(length);
-    final trimmed = _validateAndTrimJpeg(slice);
-    return trimmed;
+    final slice = await reader.read(offset, length);
+    return _validateAndTrimJpeg(slice);
   } catch (_) {
     return null;
-  } finally {
-    await raf?.close();
   }
 }
 
@@ -119,18 +176,14 @@ Future<Uint8List?> _extractRafRanged(File rawFile) async {
 /// largest one without loading the whole file.
 ///
 /// Returns null on any structural problem; the caller then falls back to a
-/// full read.
-Future<Uint8List?> _extractTiffRanged(File rawFile) async {
-  RandomAccessFile? raf;
+/// full read. Does not call [ByteRangeReader.readAll].
+Future<Uint8List?> _extractTiffRanged(ByteRangeReader reader) async {
   try {
-    raf = await rawFile.open();
-    final fileLength = await raf.length();
+    final fileLength = await reader.length();
     if (fileLength < 8) return null;
 
-    final headerSize =
-        fileLength < _tiffHeaderReadSize ? fileLength : _tiffHeaderReadSize;
-    await raf.setPosition(0);
-    final header = await raf.read(headerSize);
+    final headerSize = min(fileLength, _tiffHeaderReadSize);
+    final header = await reader.read(0, headerSize);
     if (header.isEmpty) return null;
 
     final ranges = findTiffPreviewRanges(header);
@@ -142,10 +195,9 @@ Future<Uint8List?> _extractTiffRanged(File rawFile) async {
       final offset = range.offset;
       final length = range.length;
       if (offset <= 0 || length <= 0) continue;
-      if (offset + length > fileLength) continue;
+      if (_rangePastEof(offset, length, fileLength)) continue;
 
-      await raf.setPosition(offset);
-      final slice = await raf.read(length);
+      final slice = await reader.read(offset, length);
       final trimmed = _validateAndTrimJpeg(slice);
       if (trimmed != null && trimmed.length >= _smallPreviewThreshold) {
         return trimmed;
@@ -154,8 +206,6 @@ Future<Uint8List?> _extractTiffRanged(File rawFile) async {
     return null;
   } catch (_) {
     return null;
-  } finally {
-    await raf?.close();
   }
 }
 
@@ -292,4 +342,12 @@ String _extensionOf(String path) {
   final idx = path.lastIndexOf('.');
   if (idx < 0 || idx == path.length - 1) return '';
   return path.substring(idx);
+}
+
+/// True when [offset]/[length] is negative or extends past [fileLength].
+/// Uses subtraction so the check does not depend on [offset] + [length].
+bool _rangePastEof(int offset, int length, int fileLength) {
+  if (offset < 0 || length < 0) return true;
+  if (offset > fileLength) return true;
+  return length > fileLength - offset;
 }

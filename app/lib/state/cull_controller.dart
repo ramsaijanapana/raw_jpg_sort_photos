@@ -12,6 +12,7 @@ import '../core/exporter.dart';
 import '../core/models.dart';
 import '../core/raw_preview/raw_preview_extractor.dart';
 import '../core/scanner.dart';
+import '../core/storage/byte_range_reader.dart';
 import '../services/prefs_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -191,9 +192,12 @@ final previewProvider =
 
     Uint8List? bytes;
     if (key.mode == 'jpg' && pair.jpg != null) {
-      bytes = await pair.jpg!.readAsBytes();
+      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
     } else {
-      bytes = await extractPreview(pair.raw);
+      bytes = await extractPreview(
+        IoByteRangeReader.fromFile(pair.raw),
+        name: pair.raw.path,
+      );
     }
 
     cache.lru.put(key, bytes);
@@ -218,9 +222,12 @@ final thumbnailProvider =
 
     Uint8List? bytes;
     if (pair.jpg != null) {
-      bytes = await pair.jpg!.readAsBytes();
+      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
     } else {
-      bytes = await extractPreview(pair.raw);
+      bytes = await extractPreview(
+        IoByteRangeReader.fromFile(pair.raw),
+        name: pair.raw.path,
+      );
     }
 
     cache.lru.put(stem, bytes);
@@ -243,16 +250,13 @@ final exifProvider =
 
     Uint8List bytes;
     if (pair.jpg != null) {
-      bytes = await pair.jpg!.readAsBytes();
+      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
     } else {
       // Read only first 512 KB for EXIF header parsing.
-      final raf = await pair.raw.open();
-      try {
-        final length = (await pair.raw.length()).clamp(0, 512 * 1024);
-        bytes = await raf.read(length);
-      } finally {
-        await raf.close();
-      }
+      final reader = IoByteRangeReader.fromFile(pair.raw);
+      final size = await reader.length();
+      final n = size < 512 * 1024 ? size : 512 * 1024;
+      bytes = await reader.read(0, n);
     }
 
     return Isolate.run(() => readExifSummary(bytes));
