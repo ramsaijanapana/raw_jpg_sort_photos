@@ -196,6 +196,13 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
       final result = await svc.pickDirectory(
         title: 'Open photo folder',
       );
+      if (!context.mounted) return;
+      if (result.warning != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(result.warning!)),
+        );
+        return;
+      }
       if (result.path != null) {
         await ctrl.openFolder(result.path!);
       }
