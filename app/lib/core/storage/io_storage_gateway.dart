@@ -724,8 +724,10 @@ class IoStorageGateway implements StorageGateway {
   bool _isEnospc(FileSystemException e) {
     final code = e.osError?.errorCode;
     if (code == null) return false;
-    // POSIX ENOSPC; Windows ERROR_DISK_FULL.
-    return code == 28 || code == 112;
+    // POSIX ENOSPC is portable. Windows ERROR_DISK_FULL is 112, but 112 is
+    // ENEEDAUTH / EHOSTDOWN on Darwin / Linux.
+    if (code == 28) return true;
+    return code == 112 && Platform.isWindows;
   }
 
   String _uniqueToken() {

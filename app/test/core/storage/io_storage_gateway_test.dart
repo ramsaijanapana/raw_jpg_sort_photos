@@ -948,6 +948,32 @@ void main() {
       );
     });
 
+    test('maps disk-full OS errors by host platform', () async {
+      Future<void> expectMapped(int osCode, String code) async {
+        final gated = IoStorageGateway(
+          injectIo: () async {
+            throw FileSystemException(
+              'disk full',
+              tmp.path,
+              OSError('disk full', osCode),
+            );
+          },
+        );
+        await expectLater(
+          gated.createDirectory(folder, 'RAW'),
+          throwsStorage(code),
+        );
+      }
+
+      await expectMapped(28, StorageException.quota);
+      await expectMapped(
+        112,
+        Platform.isWindows
+            ? StorageException.quota
+            : StorageException.ioFailure,
+      );
+    });
+
     test('does not swallow programming errors or StorageException', () async {
       final bug = IoStorageGateway(
         injectIo: () async {
