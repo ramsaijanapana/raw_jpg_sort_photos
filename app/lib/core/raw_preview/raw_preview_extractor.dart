@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import '../storage/byte_range_reader.dart';
+import '../storage/storage_gateway.dart';
 import 'jpeg_scan.dart';
 import 'tiff_ifd.dart';
 
@@ -82,7 +83,9 @@ Future<Uint8List?> _fullFallback(ByteRangeReader reader, String ext) async {
     String? cachePath;
     try {
       cachePath = await reader.materializeToCache();
-    } catch (_) {
+    } on StorageException {
+      cachePath = null;
+    } on FileSystemException {
       cachePath = null;
     }
     if (cachePath != null) {

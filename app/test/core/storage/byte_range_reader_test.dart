@@ -389,6 +389,221 @@ void main() {
       await reader.deleteCache(cachePath);
       expect(File(cachePath).existsSync(), isFalse);
     });
+
+    test('two concurrent readers materialize unique cache files', () async {
+      final sourceA = File(p.join(tmp.path, 'alpha.arw'));
+      final sourceB = File(p.join(tmp.path, 'beta.arw'));
+      final bytesA = Uint8List.fromList([0xAA, 0x01, 0x02]);
+      final bytesB = Uint8List.fromList([0xBB, 0x03, 0x04, 0x05]);
+      await sourceA.writeAsBytes(bytesA);
+      await sourceB.writeAsBytes(bytesB);
+      final readerA = IoByteRangeReader.fromFile(
+        sourceA,
+        cacheDirectory: tmp,
+      );
+      final readerB = IoByteRangeReader.fromFile(
+        sourceB,
+        cacheDirectory: tmp,
+      );
+
+      final paths = await Future.wait([
+        readerA.materializeToCache(),
+        readerB.materializeToCache(),
+      ]);
+      final pathA = paths[0];
+      final pathB = paths[1];
+
+      expect(pathA, isNot(pathB));
+      expect(p.basename(pathA), startsWith('ps_mat_'));
+      expect(p.basename(pathB), startsWith('ps_mat_'));
+      expect(p.basename(pathA), isNot(contains('alpha.arw')));
+      expect(p.basename(pathB), isNot(contains('beta.arw')));
+      expect(File(pathA).readAsBytesSync(), bytesA);
+      expect(File(pathB).readAsBytesSync(), bytesB);
+
+      await expectLater(
+        readerA.deleteCache(pathB),
+        throwsStorage(StorageException.invalidArg),
+      );
+      await expectLater(
+        readerB.deleteCache(pathA),
+        throwsStorage(StorageException.invalidArg),
+      );
+      expect(File(pathA).readAsBytesSync(), bytesA);
+      expect(File(pathB).readAsBytesSync(), bytesB);
+
+      await readerA.deleteCache(pathA);
+      await readerB.deleteCache(pathB);
+      expect(File(pathA).existsSync(), isFalse);
+      expect(File(pathB).existsSync(), isFalse);
+    });
+
+    test('maps FileSystemException to io_failure or quota', () async {
+      final file = File(p.join(tmp.path, 'map.bin'));
+      await file.writeAsBytes([1, 2, 3]);
+      final ioFail = IoByteRangeReader.fromFile(
+        file,
+        cacheDirectory: tmp,
+        injectIo: () async {
+          throw FileSystemException('permission', file.path);
+        },
+      );
+      final quota = IoByteRangeReader.fromFile(
+        file,
+        cacheDirectory: tmp,
+        injectIo: () async {
+          throw FileSystemException(
+            'No space left on device',
+            file.path,
+            const OSError('No space left on device', 28),
+          );
+        },
+      );
+
+      await expectLater(
+        ioFail.length(),
+        throwsA(
+          isA<StorageException>()
+              .having((e) => e.code, 'code', StorageException.ioFailure)
+              .having((e) => e.details?['path'], 'path', file.path),
+        ),
+      );
+      await expectLater(
+        ioFail.read(0, 1),
+        throwsStorage(StorageException.ioFailure),
+      );
+      await expectLater(
+        ioFail.readAll(),
+        throwsStorage(StorageException.ioFailure),
+      );
+      await expectLater(
+        ioFail.materializeToCache(),
+        throwsStorage(StorageException.ioFailure),
+      );
+      await expectLater(
+        quota.length(),
+        throwsStorage(StorageException.quota),
+      );
+
+      var deleteCalls = 0;
+      final deleteFail = IoByteRangeReader.fromFile(
+        file,
+        cacheDirectory: tmp,
+        injectIo: () async {
+          deleteCalls += 1;
+          if (deleteCalls > 1) {
+            throw FileSystemException('delete failed', file.path);
+          }
+        },
+      );
+      final issued = await deleteFail.materializeToCache();
+      await expectLater(
+        deleteFail.deleteCache(issued),
+        throwsStorage(StorageException.ioFailure),
+      );
+
+      final raf = await file.open();
+      try {
+        final rafFail = IoByteRangeReader.fromRandomAccessFile(
+          raf,
+          injectIo: () async {
+            throw FileSystemException('permission', file.path);
+          },
+        );
+        await expectLater(
+          rafFail.length(),
+          throwsStorage(StorageException.ioFailure),
+        );
+        await expectLater(
+          rafFail.read(0, 1),
+          throwsStorage(StorageException.ioFailure),
+        );
+        await expectLater(
+          rafFail.readAll(),
+          throwsStorage(StorageException.ioFailure),
+        );
+      } finally {
+        await raf.close();
+      }
+    });
+
+    test('maps disk-full OS errors by host platform', () async {
+      final file = File(p.join(tmp.path, 'disk.bin'));
+      await file.writeAsBytes([1]);
+
+      Future<void> expectMapped(int osCode, String code) async {
+        final gated = IoByteRangeReader.fromFile(
+          file,
+          cacheDirectory: tmp,
+          injectIo: () async {
+            throw FileSystemException(
+              'disk full',
+              file.path,
+              OSError('disk full', osCode),
+            );
+          },
+        );
+        await expectLater(gated.length(), throwsStorage(code));
+      }
+
+      await expectMapped(28, StorageException.quota);
+      await expectMapped(
+        112,
+        Platform.isWindows
+            ? StorageException.quota
+            : StorageException.ioFailure,
+      );
+    });
+
+    test('does not swallow programming errors or StorageException', () async {
+      final file = File(p.join(tmp.path, 'prog.bin'));
+      await file.writeAsBytes([9]);
+      final argument = IoByteRangeReader.fromFile(
+        file,
+        injectIo: () async {
+          throw ArgumentError('programmer bug');
+        },
+      );
+      final state = IoByteRangeReader.fromFile(
+        file,
+        injectIo: () async {
+          throw StateError('programmer bug');
+        },
+      );
+      final typed = IoByteRangeReader.fromFile(
+        file,
+        injectIo: () async {
+          throw const StorageException(
+            StorageException.quota,
+            'already typed',
+          );
+        },
+      );
+      final missing = IoByteRangeReader.fromFile(
+        File(p.join(tmp.path, 'gone.bin')),
+      );
+
+      await expectLater(argument.length(), throwsA(isA<ArgumentError>()));
+      await expectLater(argument.read(0, 1), throwsA(isA<ArgumentError>()));
+      await expectLater(argument.readAll(), throwsA(isA<ArgumentError>()));
+      await expectLater(
+        argument.materializeToCache(),
+        throwsA(isA<ArgumentError>()),
+      );
+      await expectLater(state.length(), throwsA(isA<StateError>()));
+      await expectLater(
+        typed.length(),
+        throwsStorage(StorageException.quota),
+      );
+      await expectLater(
+        missing.length(),
+        throwsStorage(StorageException.notFound),
+      );
+      await expectLater(
+        argument.read(-1, 1),
+        throwsStorage(StorageException.invalidArg),
+      );
+    });
   });
 
   group('GatewayByteRangeReader', () {

@@ -146,6 +146,57 @@ void main() {
         ),
       );
     });
+
+    test('storage failure from materializeToCache falls back to readAll',
+        () async {
+      final storage = _ThrowingCacheReader(
+        Uint8List.fromList(List<int>.filled(32, 0)),
+        materializeError: const StorageException(
+          StorageException.ioFailure,
+          'copy failed',
+        ),
+      );
+      await extractPreview(storage, extension: '.cr3');
+      expect(storage.materializeCount, 1);
+      expect(storage.readAllCount, 1);
+      expect(storage.deleteCacheCount, 0);
+
+      final fs = _ThrowingCacheReader(
+        Uint8List.fromList(List<int>.filled(32, 0)),
+        materializeError: const FileSystemException('copy failed'),
+      );
+      await extractPreview(fs, extension: '.cr3');
+      expect(fs.materializeCount, 1);
+      expect(fs.readAllCount, 1);
+      expect(fs.deleteCacheCount, 0);
+    });
+
+    test('programmer error from materializeToCache does not fall back',
+        () async {
+      final argument = _ThrowingCacheReader(
+        Uint8List.fromList(List<int>.filled(32, 0)),
+        materializeError: ArgumentError('broken reader'),
+      );
+      await expectLater(
+        extractPreview(argument, extension: '.cr3'),
+        throwsA(isA<ArgumentError>()),
+      );
+      expect(argument.materializeCount, 1);
+      expect(argument.readAllCount, 0);
+      expect(argument.deleteCacheCount, 0);
+
+      final state = _ThrowingCacheReader(
+        Uint8List.fromList(List<int>.filled(32, 0)),
+        materializeError: StateError('broken reader'),
+      );
+      await expectLater(
+        extractPreview(state, extension: '.cr3'),
+        throwsA(isA<StateError>()),
+      );
+      expect(state.materializeCount, 1);
+      expect(state.readAllCount, 0);
+      expect(state.deleteCacheCount, 0);
+    });
   });
 }
 
@@ -170,6 +221,42 @@ class _RecordingReader implements ByteRangeReader {
   Future<Uint8List> readAll() async {
     readAllCount++;
     return Uint8List.fromList(bytes);
+  }
+}
+
+class _ThrowingCacheReader implements CacheMaterializingByteRangeReader {
+  _ThrowingCacheReader(this.bytes, {required this.materializeError});
+
+  final Uint8List bytes;
+  final Object materializeError;
+  int readAllCount = 0;
+  int materializeCount = 0;
+  int deleteCacheCount = 0;
+
+  @override
+  Future<int> length() async => bytes.length;
+
+  @override
+  Future<Uint8List> read(int offset, int length) async {
+    final end = (offset + length).clamp(offset, bytes.length);
+    return Uint8List.fromList(bytes.sublist(offset, end));
+  }
+
+  @override
+  Future<Uint8List> readAll() async {
+    readAllCount++;
+    return Uint8List.fromList(bytes);
+  }
+
+  @override
+  Future<String> materializeToCache() async {
+    materializeCount++;
+    throw materializeError;
+  }
+
+  @override
+  Future<void> deleteCache(String cachePath) async {
+    deleteCacheCount++;
   }
 }
 

@@ -69,14 +69,17 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
     required RandomAccessFile? raf,
     required this.displayName,
     required Directory? cacheDirectory,
+    Future<void> Function()? injectIo,
   })  : _file = file,
         _raf = raf,
-        _cacheDirectory = cacheDirectory;
+        _cacheDirectory = cacheDirectory,
+        _injectIo = injectIo;
 
   factory IoByteRangeReader.fromFile(
     File file, {
     String? displayName,
     Directory? cacheDirectory,
+    Future<void> Function()? injectIo,
   }) {
     assertSafeLocalPath(file.path);
     return IoByteRangeReader._(
@@ -84,6 +87,7 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
       raf: null,
       displayName: displayName ?? p.basename(file.path),
       cacheDirectory: cacheDirectory,
+      injectIo: injectIo,
     );
   }
 
@@ -91,12 +95,14 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
     RandomAccessFile raf, {
     String? displayName,
     Directory? cacheDirectory,
+    Future<void> Function()? injectIo,
   }) {
     return IoByteRangeReader._(
       file: null,
       raf: raf,
       displayName: displayName ?? 'unnamed',
       cacheDirectory: cacheDirectory,
+      injectIo: injectIo,
     );
   }
 
@@ -104,48 +110,60 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
   final RandomAccessFile? _raf;
   final String displayName;
   final Directory? _cacheDirectory;
+  final Future<void> Function()? _injectIo;
 
   final Set<String> _ownedCachePaths = <String>{};
   final Set<String> _retiredCachePaths = <String>{};
-  int _seq = 0;
+
+  /// Process-wide. Instance counters are useless: readers are one-shot.
+  static int _seq = 0;
 
   @override
-  Future<int> length() async {
-    if (_raf != null) {
-      return _raf.length();
-    }
-    return _withFile((file) => file.length());
+  Future<int> length() {
+    return _guardIo(() async {
+      final raf = _raf;
+      if (raf != null) {
+        return raf.length();
+      }
+      return _withFile((file) => file.length());
+    });
   }
 
   @override
-  Future<Uint8List> read(int offset, int length) async {
+  Future<Uint8List> read(int offset, int length) {
     if (offset < 0 || length < 0) {
       throw const StorageException(
         StorageException.invalidArg,
         'offset and length must be non-negative',
       );
     }
-    if (_raf != null) {
-      return _readFromRaf(_raf, offset, length);
-    }
-    return _withFile((file) async {
-      final raf = await file.open();
-      try {
-        return await _readFromRaf(raf, offset, length);
-      } finally {
-        await raf.close();
+    return _guardIo(() async {
+      final raf = _raf;
+      if (raf != null) {
+        return _readFromRaf(raf, offset, length);
       }
+      return _withFile((file) async {
+        final opened = await file.open();
+        try {
+          return await _readFromRaf(opened, offset, length);
+        } finally {
+          await opened.close();
+        }
+      });
     });
   }
 
   @override
-  Future<Uint8List> readAll() async {
-    if (_raf != null) {
-      final size = await _raf.length();
-      await _raf.setPosition(0);
-      return _raf.read(size);
-    }
-    return _withFile((file) => file.readAsBytes());
+  Future<Uint8List> readAll() {
+    return _guardIo(() async {
+      final raf = _raf;
+      if (raf != null) {
+        final size = await raf.length();
+        await raf.setPosition(0);
+        return raf.read(size);
+      }
+      return _withFile((file) => file.readAsBytes());
+    });
   }
 
   /// Copies a local file to a generated `ps_mat_*` name. Never uses [readAll].
@@ -162,35 +180,33 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
     assertSafeLocalPath(file.path);
     final cacheDir = _cacheDirectory ?? Directory.systemTemp;
     assertSafeLocalPath(cacheDir.path);
-    _seq += 1;
-    final cachePath = p.join(
-      cacheDir.path,
-      'ps_mat_${DateTime.now().microsecondsSinceEpoch}_$_seq',
-    );
-    var issued = false;
-    try {
-      await file.copy(cachePath);
-      final copied = File(cachePath);
-      if (await copied.length() != await file.length()) {
-        throw const StorageException(
-          StorageException.ioFailure,
-          'cache copy size mismatch',
-        );
+    return _guardIo(() async {
+      final cachePath = p.join(cacheDir.path, 'ps_mat_${_uniqueToken()}');
+      var issued = false;
+      try {
+        await file.copy(cachePath);
+        final copied = File(cachePath);
+        if (await copied.length() != await file.length()) {
+          throw const StorageException(
+            StorageException.ioFailure,
+            'cache copy size mismatch',
+          );
+        }
+        _ownedCachePaths.add(cachePath);
+        _retiredCachePaths.remove(cachePath);
+        issued = true;
+        return cachePath;
+      } finally {
+        if (!issued) {
+          try {
+            final partial = File(cachePath);
+            if (await partial.exists()) {
+              await partial.delete();
+            }
+          } catch (_) {}
+        }
       }
-      _ownedCachePaths.add(cachePath);
-      _retiredCachePaths.remove(cachePath);
-      issued = true;
-      return cachePath;
-    } finally {
-      if (!issued) {
-        try {
-          final partial = File(cachePath);
-          if (await partial.exists()) {
-            await partial.delete();
-          }
-        } catch (_) {}
-      }
-    }
+    });
   }
 
   @override
@@ -205,12 +221,14 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
         'cache path was not issued by this reader',
       );
     }
-    final file = File(cachePath);
-    if (await file.exists()) {
-      await file.delete();
-    }
-    _ownedCachePaths.remove(cachePath);
-    _retiredCachePaths.add(cachePath);
+    await _guardIo(() async {
+      final file = File(cachePath);
+      if (await file.exists()) {
+        await file.delete();
+      }
+      _ownedCachePaths.remove(cachePath);
+      _retiredCachePaths.add(cachePath);
+    });
   }
 
   Future<T> _withFile<T>(Future<T> Function(File file) action) async {
@@ -250,6 +268,41 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
     final toRead = min(length, size - offset);
     await raf.setPosition(offset);
     return raf.read(toRead);
+  }
+
+  Future<T> _guardIo<T>(Future<T> Function() action) async {
+    try {
+      if (_injectIo != null) {
+        await _injectIo!();
+      }
+      return await action();
+    } on StorageException {
+      rethrow;
+    } on FileSystemException catch (e) {
+      throw _toStorageException(e);
+    }
+  }
+
+  StorageException _toStorageException(FileSystemException e) {
+    return StorageException(
+      _isEnospc(e) ? StorageException.quota : StorageException.ioFailure,
+      e.message,
+      {'path': e.path},
+    );
+  }
+
+  bool _isEnospc(FileSystemException e) {
+    final code = e.osError?.errorCode;
+    if (code == null) return false;
+    // POSIX ENOSPC is portable. Windows ERROR_DISK_FULL is 112, but 112 is
+    // ENEEDAUTH / EHOSTDOWN on Darwin / Linux.
+    if (code == 28) return true;
+    return code == 112 && Platform.isWindows;
+  }
+
+  String _uniqueToken() {
+    _seq += 1;
+    return '${DateTime.now().microsecondsSinceEpoch}_$_seq';
   }
 }
 
