@@ -48,6 +48,9 @@ Future<int> _copyIfPresent(
   StorageEntry file,
   FolderRef destination,
 ) async {
+  if (!await _sourceIsPresent(gateway, file)) {
+    return 0;
+  }
   try {
     await gateway.copyFile(
       file,
@@ -57,9 +60,34 @@ Future<int> _copyIfPresent(
     );
     return 1;
   } on StorageException catch (e) {
-    if (e.code == StorageException.notFound) return 0;
+    if (e.code != StorageException.notFound) rethrow;
+    if (!await _sourceIsPresent(gateway, file)) {
+      return 0;
+    }
     rethrow;
   }
+}
+
+/// Presence via [StorageGateway.childByName] on [file.folder] / [file.name].
+///
+/// Local listings keep [StorageEntry.folder] at the scan root even when the
+/// file lives in `RAW/` or `JPG/`, so those child ids are probed too. This
+/// does not construct [File], [Directory], or a URI-derived path.
+Future<bool> _sourceIsPresent(
+  StorageGateway gateway,
+  StorageEntry file,
+) async {
+  for (final parentDocumentId in const <String?>[null, 'RAW', 'JPG']) {
+    final found = await gateway.childByName(
+      file.folder,
+      file.name,
+      parentDocumentId: parentDocumentId,
+    );
+    if (found != null && !found.isDirectory) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /// Creates a missing local export root after Task 03 classification.

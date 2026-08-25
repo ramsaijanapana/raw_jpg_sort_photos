@@ -328,5 +328,158 @@ void main() {
         ),
       );
     });
+
+    test('source absent before copy: zero copied, no write attempt', () async {
+      final pair = await makePair(stem: 'ABSENT', rawExt: '.arw');
+      await File(pair.raw.localPath!).delete();
+      final session = CullSession({'ABSENT': CullFlag.keep});
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: session,
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 0);
+      expect(gateway.copyFileCalls, 0);
+      expect(File(p.join(dest.path, 'ABSENT.arw')).existsSync(), isFalse);
+    });
+
+    test('source disappears during copyFile not_found: zero copied', () async {
+      final pair = await makePair(stem: 'VANISH', rawExt: '.arw');
+      final session = CullSession({'VANISH': CullFlag.keep});
+      final gateway = _ExportOriginGateway(
+        deleteOnCopy: File(pair.raw.localPath!),
+      );
+
+      final result = await export(
+        pairs: [pair],
+        session: session,
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 0);
+      expect(gateway.copyFileCalls, 1);
+      expect(File(p.join(dest.path, 'VANISH.arw')).existsSync(), isFalse);
+    });
+
+    test(
+        'source still present while copyFile not_found for dest parent '
+        'propagates the exact error', () async {
+      final pair = await makePair(stem: 'DEST_GONE', rawExt: '.arw');
+      await createFile(p.join(dest.path, 'DEST_GONE.arw'), 'old_content');
+      final session = CullSession({'DEST_GONE': CullFlag.keep});
+      const destMissing = StorageException(
+        StorageException.notFound,
+        'destination folder not found',
+      );
+      final gateway = _ExportOriginGateway(copyFileThrow: destMissing);
+
+      await expectLater(
+        export(
+          pairs: [pair],
+          session: session,
+          includeJpgs: false,
+          gateway: gateway,
+        ),
+        throwsA(same(destMissing)),
+      );
+      expect(gateway.copyFileCalls, 1);
+      expect(
+        File(p.join(dest.path, 'DEST_GONE.arw')).readAsStringSync(),
+        'old_content',
+      );
+    });
+
+    test('non-not_found storage errors still propagate', () async {
+      final pair = await makePair(stem: 'DENIED', rawExt: '.arw');
+      final session = CullSession({'DENIED': CullFlag.keep});
+      const denied = StorageException(
+        StorageException.permissionDenied,
+        'read only',
+      );
+      final gateway = _ExportOriginGateway(copyFileThrow: denied);
+
+      await expectLater(
+        export(
+          pairs: [pair],
+          session: session,
+          includeJpgs: false,
+          gateway: gateway,
+        ),
+        throwsA(same(denied)),
+      );
+      expect(gateway.copyFileCalls, 1);
+    });
+
+    test('copies a RAW/ source found by folder and name', () async {
+      final rawFile = await createFile(
+        p.join(src.path, 'RAW', 'IN_RAW.arw'),
+        'raw_content',
+      );
+      final pair = PhotoPair(
+        stem: 'IN_RAW',
+        raw: StorageEntry(
+          folder: LocalFolder(src.path),
+          name: 'IN_RAW.arw',
+          mimeType: 'application/octet-stream',
+          isDirectory: false,
+          localPath: rawFile.path,
+        ),
+      );
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'IN_RAW': CullFlag.keep}),
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 1);
+      expect(gateway.copyFileCalls, 1);
+      expect(File(p.join(dest.path, 'IN_RAW.arw')).existsSync(), isTrue);
+    });
   });
+}
+
+/// Production [IoStorageGateway] with scripted [copyFile] origin cases.
+class _ExportOriginGateway extends IoStorageGateway {
+  _ExportOriginGateway({
+    this.copyFileThrow,
+    this.deleteOnCopy,
+  });
+
+  final Object? copyFileThrow;
+  final File? deleteOnCopy;
+  int copyFileCalls = 0;
+
+  @override
+  Future<void> copyFile(
+    StorageEntry source,
+    FolderRef destFolder,
+    String destName, {
+    String? destParentDocumentId,
+    required bool overwrite,
+  }) async {
+    copyFileCalls++;
+    final disappearing = deleteOnCopy;
+    if (disappearing != null && await disappearing.exists()) {
+      await disappearing.delete();
+    }
+    final error = copyFileThrow;
+    if (error != null) {
+      throw error;
+    }
+    return super.copyFile(
+      source,
+      destFolder,
+      destName,
+      destParentDocumentId: destParentDocumentId,
+      overwrite: overwrite,
+    );
+  }
 }
