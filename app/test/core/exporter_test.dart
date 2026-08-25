@@ -329,7 +329,8 @@ void main() {
       );
     });
 
-    test('source absent before copy: zero copied, no write attempt', () async {
+    test('exact source absent before copy: zero copied, no write attempt',
+        () async {
       final pair = await makePair(stem: 'ABSENT', rawExt: '.arw');
       await File(pair.raw.localPath!).delete();
       final session = CullSession({'ABSENT': CullFlag.keep});
@@ -344,10 +345,12 @@ void main() {
 
       expect(result.copied, 0);
       expect(gateway.copyFileCalls, 0);
+      expect(gateway.lastProbed, same(pair.raw));
       expect(File(p.join(dest.path, 'ABSENT.arw')).existsSync(), isFalse);
     });
 
-    test('source disappears during copyFile not_found: zero copied', () async {
+    test('exact source vanishes during copyFile not_found: zero copied',
+        () async {
       final pair = await makePair(stem: 'VANISH', rawExt: '.arw');
       final session = CullSession({'VANISH': CullFlag.keep});
       final gateway = _ExportOriginGateway(
@@ -363,12 +366,14 @@ void main() {
 
       expect(result.copied, 0);
       expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
       expect(File(p.join(dest.path, 'VANISH.arw')).existsSync(), isFalse);
     });
 
     test(
-        'source still present while copyFile not_found for dest parent '
-        'propagates the exact error', () async {
+        'exact source still present while copyFile not_found for dest parent '
+        'rethrows the identical original error', () async {
       final pair = await makePair(stem: 'DEST_GONE', rawExt: '.arw');
       await createFile(p.join(dest.path, 'DEST_GONE.arw'), 'old_content');
       final session = CullSession({'DEST_GONE': CullFlag.keep});
@@ -388,13 +393,15 @@ void main() {
         throwsA(same(destMissing)),
       );
       expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
       expect(
         File(p.join(dest.path, 'DEST_GONE.arw')).readAsStringSync(),
         'old_content',
       );
     });
 
-    test('non-not_found storage errors still propagate', () async {
+    test('direct copy non-not_found storage errors still propagate', () async {
       final pair = await makePair(stem: 'DENIED', rawExt: '.arw');
       final session = CullSession({'DENIED': CullFlag.keep});
       const denied = StorageException(
@@ -415,20 +422,83 @@ void main() {
       expect(gateway.copyFileCalls, 1);
     });
 
-    test('copies a RAW/ source found by folder and name', () async {
+    test('presence-probe non-not_found errors propagate and skip copy',
+        () async {
+      final pair = await makePair(stem: 'PROBE_DENY', rawExt: '.arw');
+      const denied = StorageException(
+        StorageException.permissionDenied,
+        'probe denied',
+      );
+      final gateway = _ExportOriginGateway(byteLengthThrow: denied);
+
+      await expectLater(
+        export(
+          pairs: [pair],
+          session: CullSession({'PROBE_DENY': CullFlag.keep}),
+          includeJpgs: false,
+          gateway: gateway,
+        ),
+        throwsA(same(denied)),
+      );
+      expect(gateway.copyFileCalls, 0);
+      expect(gateway.lastProbed, same(pair.raw));
+    });
+
+    test(
+        'recheck non-not_found after copyFile not_found propagates the '
+        'probe error', () async {
+      final pair = await makePair(stem: 'RECHECK_DENY', rawExt: '.arw');
+      const destMissing = StorageException(
+        StorageException.notFound,
+        'destination folder not found',
+      );
+      const probeDenied = StorageException(
+        StorageException.permissionDenied,
+        'recheck denied',
+      );
+      final gateway = _ExportOriginGateway(
+        copyFileThrow: destMissing,
+        byteLengthThrowAfterCopy: probeDenied,
+      );
+
+      await expectLater(
+        export(
+          pairs: [pair],
+          session: CullSession({'RECHECK_DENY': CullFlag.keep}),
+          includeJpgs: false,
+          gateway: gateway,
+        ),
+        throwsA(same(probeDenied)),
+      );
+      expect(gateway.copyFileCalls, 1);
+    });
+
+    test('copies a root source by exact entry identity', () async {
+      final pair = await makePair(stem: 'AT_ROOT', rawExt: '.arw');
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'AT_ROOT': CullFlag.keep}),
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 1);
+      expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
+      expect(File(p.join(dest.path, 'AT_ROOT.arw')).existsSync(), isTrue);
+    });
+
+    test('copies a RAW/ nested source by exact entry identity', () async {
       final rawFile = await createFile(
         p.join(src.path, 'RAW', 'IN_RAW.arw'),
         'raw_content',
       );
       final pair = PhotoPair(
         stem: 'IN_RAW',
-        raw: StorageEntry(
-          folder: LocalFolder(src.path),
-          name: 'IN_RAW.arw',
-          mimeType: 'application/octet-stream',
-          isDirectory: false,
-          localPath: rawFile.path,
-        ),
+        raw: entryFor(rawFile),
       );
       final gateway = _ExportOriginGateway();
 
@@ -441,21 +511,152 @@ void main() {
 
       expect(result.copied, 1);
       expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
       expect(File(p.join(dest.path, 'IN_RAW.arw')).existsSync(), isTrue);
+    });
+
+    test('copies a JPG/ nested source by exact entry identity', () async {
+      final rawFile = await createFile(
+        p.join(src.path, 'RAW', 'IN_JPG.arw'),
+        'raw_content',
+      );
+      final jpgFile = await createFile(
+        p.join(src.path, 'JPG', 'IN_JPG.jpg'),
+        'jpg_content',
+      );
+      final pair = PhotoPair(
+        stem: 'IN_JPG',
+        raw: entryFor(rawFile),
+        jpg: entryFor(jpgFile),
+      );
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'IN_JPG': CullFlag.keep}),
+        includeJpgs: true,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 2);
+      expect(gateway.copyFileCalls, 2);
+      expect(File(p.join(dest.path, 'IN_JPG.arw')).existsSync(), isTrue);
+      expect(File(p.join(dest.path, 'IN_JPG.jpg')).existsSync(), isTrue);
+    });
+
+    test('copies an arbitrarily nested local source by exact entry identity',
+        () async {
+      final rawFile = await createFile(
+        p.join(src.path, 'session', 'day1', 'NESTED.arw'),
+        'raw_content',
+      );
+      final pair = PhotoPair(
+        stem: 'NESTED',
+        raw: entryFor(rawFile),
+      );
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'NESTED': CullFlag.keep}),
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 1);
+      expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
+      expect(File(p.join(dest.path, 'NESTED.arw')).existsSync(), isTrue);
+    });
+
+    test(
+        'skips a missing exact source when same-named files exist in '
+        'root/RAW/JPG', () async {
+      final exact = await createFile(
+        p.join(src.path, 'album', 'SAME.arw'),
+        'exact',
+      );
+      final pair = PhotoPair(
+        stem: 'SAME',
+        raw: entryFor(exact),
+      );
+      await exact.delete();
+      await createFile(p.join(src.path, 'SAME.arw'), 'root_decoy');
+      await createFile(p.join(src.path, 'RAW', 'SAME.arw'), 'raw_decoy');
+      await createFile(p.join(src.path, 'JPG', 'SAME.arw'), 'jpg_decoy');
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'SAME': CullFlag.keep}),
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 0);
+      expect(gateway.copyFileCalls, 0);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(File(p.join(dest.path, 'SAME.arw')).existsSync(), isFalse);
+    });
+
+    test('treats a zero-byte exact source as present, not missing', () async {
+      final rawFile = await createFile(p.join(src.path, 'EMPTY.arw'), '');
+      final pair = PhotoPair(
+        stem: 'EMPTY',
+        raw: entryFor(rawFile),
+      );
+      final gateway = _ExportOriginGateway();
+
+      final result = await export(
+        pairs: [pair],
+        session: CullSession({'EMPTY': CullFlag.keep}),
+        includeJpgs: false,
+        gateway: gateway,
+      );
+
+      expect(result.copied, 1);
+      expect(gateway.copyFileCalls, 1);
+      expect(gateway.lastProbed, same(pair.raw));
+      expect(gateway.lastCopied, same(pair.raw));
+      expect(File(p.join(dest.path, 'EMPTY.arw')).lengthSync(), 0);
     });
   });
 }
 
-/// Production [IoStorageGateway] with scripted [copyFile] origin cases.
+/// Production [IoStorageGateway] with scripted [byteLength] / [copyFile] seams.
 class _ExportOriginGateway extends IoStorageGateway {
   _ExportOriginGateway({
     this.copyFileThrow,
     this.deleteOnCopy,
+    this.byteLengthThrow,
+    this.byteLengthThrowAfterCopy,
   });
 
   final Object? copyFileThrow;
   final File? deleteOnCopy;
+  final Object? byteLengthThrow;
+  final Object? byteLengthThrowAfterCopy;
   int copyFileCalls = 0;
+  StorageEntry? lastProbed;
+  StorageEntry? lastCopied;
+
+  @override
+  Future<int> byteLength(StorageEntry file) async {
+    lastProbed = file;
+    final probeError = byteLengthThrow;
+    if (probeError != null) {
+      throw probeError;
+    }
+    if (copyFileCalls > 0) {
+      final afterCopy = byteLengthThrowAfterCopy;
+      if (afterCopy != null) {
+        throw afterCopy;
+      }
+    }
+    return super.byteLength(file);
+  }
 
   @override
   Future<void> copyFile(
@@ -466,6 +667,7 @@ class _ExportOriginGateway extends IoStorageGateway {
     required bool overwrite,
   }) async {
     copyFileCalls++;
+    lastCopied = source;
     final disappearing = deleteOnCopy;
     if (disappearing != null && await disappearing.exists()) {
       await disappearing.delete();

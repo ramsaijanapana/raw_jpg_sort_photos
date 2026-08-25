@@ -68,26 +68,22 @@ Future<int> _copyIfPresent(
   }
 }
 
-/// Presence via [StorageGateway.childByName] on [file.folder] / [file.name].
+/// Exact-entry presence via [StorageGateway.byteLength].
 ///
-/// Local listings keep [StorageEntry.folder] at the scan root even when the
-/// file lives in `RAW/` or `JPG/`, so those child ids are probed too. This
-/// does not construct [File], [Directory], or a URI-derived path.
+/// Only [StorageException.notFound] means this [file] is absent. A zero-byte
+/// length is present. Any other storage error propagates. Does not construct
+/// [File], [Directory], a URI-derived path, or a parent document id.
 Future<bool> _sourceIsPresent(
   StorageGateway gateway,
   StorageEntry file,
 ) async {
-  for (final parentDocumentId in const <String?>[null, 'RAW', 'JPG']) {
-    final found = await gateway.childByName(
-      file.folder,
-      file.name,
-      parentDocumentId: parentDocumentId,
-    );
-    if (found != null && !found.isDirectory) {
-      return true;
-    }
+  try {
+    await gateway.byteLength(file);
+    return true;
+  } on StorageException catch (e) {
+    if (e.code != StorageException.notFound) rethrow;
+    return false;
   }
-  return false;
 }
 
 /// Creates a missing local export root after Task 03 classification.
