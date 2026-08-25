@@ -1,8 +1,9 @@
 import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
-import 'package:path/path.dart' as p;
+
+import 'folder_ref.dart';
 import 'models.dart';
+import 'storage/storage_gateway.dart';
 
 /// File name used to persist cull session data. Backward-compatible with
 /// the Python app's cull_session.json format.
@@ -28,20 +29,23 @@ class CullSession {
   ///
   /// Returns an empty session if the file is missing or contains invalid JSON.
   /// Never throws.
-  static Future<CullSession> load(Directory folder) async {
-    final file = File(p.join(folder.path, cullSessionFileName));
+  static Future<CullSession> load(
+    FolderRef folder, {
+    required StorageGateway gateway,
+  }) async {
     try {
-      if (!await file.exists()) {
+      final entry = await gateway.childByName(folder, cullSessionFileName);
+      if (entry == null || entry.isDirectory) {
         return CullSession();
       }
-      final text = await file.readAsString();
+      final text = utf8.decode(await gateway.readAll(entry));
       final decoded = jsonDecode(text);
       if (decoded is! Map) return CullSession();
 
       final flags = <String, CullFlag>{};
-      for (final entry in decoded.entries) {
-        final stem = entry.key as String;
-        final value = entry.value;
+      for (final mapEntry in decoded.entries) {
+        final stem = mapEntry.key as String;
+        final value = mapEntry.value;
         if (value == 'keep') {
           flags[stem] = CullFlag.keep;
         } else if (value == 'skip') {
@@ -59,8 +63,11 @@ class CullSession {
   /// Saves the session to [folder]/cull_session.json.
   ///
   /// Only keep/skip flags are written; undecided entries are omitted.
-  /// Failures are silently ignored.
-  Future<void> save(Directory folder) async {
+  /// Failures are silently ignored. Does not create a missing folder.
+  Future<void> save(
+    FolderRef folder, {
+    required StorageGateway gateway,
+  }) async {
     try {
       final data = <String, String>{};
       for (final entry in _flags.entries) {
@@ -71,8 +78,15 @@ class CullSession {
         }
         // undecided => omit
       }
-      final file = File(p.join(folder.path, cullSessionFileName));
-      await file.writeAsString(jsonEncode(data));
+      var file = await gateway.childByName(folder, cullSessionFileName);
+      if (file == null || file.isDirectory) {
+        file = await gateway.createFile(
+          folder,
+          cullSessionFileName,
+          mimeType: 'application/json',
+        );
+      }
+      await gateway.writeBytes(file, utf8.encode(jsonEncode(data)));
     } catch (_) {
       // Ignore write errors silently
     }

@@ -3,22 +3,34 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:photo_sorter/core/cull_session.dart';
+import 'package:photo_sorter/core/folder_ref.dart';
 import 'package:photo_sorter/core/models.dart';
+import 'package:photo_sorter/core/storage/io_storage_gateway.dart';
 
 void main() {
   late Directory tmp;
+  late LocalFolder folder;
+  late IoStorageGateway gateway;
 
   setUp(() async {
     tmp = await Directory.systemTemp.createTemp('cull_test_');
+    folder = LocalFolder(tmp.path);
+    gateway = IoStorageGateway();
   });
 
   tearDown(() async {
     await tmp.delete(recursive: true);
   });
 
+  Future<CullSession> loadFolder([LocalFolder? target]) =>
+      CullSession.load(target ?? folder, gateway: gateway);
+
+  Future<void> saveFolder(CullSession session, [LocalFolder? target]) =>
+      session.save(target ?? folder, gateway: gateway);
+
   group('CullSession.load', () {
     test('returns empty session when file does not exist', () async {
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flags, isEmpty);
     });
 
@@ -26,7 +38,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('{"IMG_001":"keep","IMG_002":"skip"}');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flagFor('IMG_001'), CullFlag.keep);
       expect(session.flagFor('IMG_002'), CullFlag.skip);
     });
@@ -35,7 +47,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('{"IMG_001":"keep"}');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flagFor('IMG_999'), CullFlag.undecided);
     });
 
@@ -43,7 +55,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('{ this is not valid json }');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flags, isEmpty);
     });
 
@@ -51,7 +63,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('{}');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flags, isEmpty);
     });
 
@@ -59,7 +71,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('{"IMG_001":"maybe","IMG_002":"keep"}');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flagFor('IMG_001'), CullFlag.undecided);
       expect(session.flagFor('IMG_002'), CullFlag.keep);
     });
@@ -68,7 +80,7 @@ void main() {
       final file = File(p.join(tmp.path, 'cull_session.json'));
       await file.writeAsString('["keep", "skip"]');
 
-      final session = await CullSession.load(tmp);
+      final session = await loadFolder();
       expect(session.flags, isEmpty);
     });
   });
@@ -81,7 +93,7 @@ void main() {
         'IMG_003': CullFlag.undecided,
       });
 
-      await session.save(tmp);
+      await saveFolder(session);
 
       final file = File(p.join(tmp.path, 'cull_session.json'));
       expect(file.existsSync(), isTrue);
@@ -91,7 +103,6 @@ void main() {
       expect(decoded['IMG_001'], 'keep');
       expect(decoded.containsKey('IMG_002'), isTrue);
       expect(decoded['IMG_002'], 'skip');
-      // Undecided should NOT be present
       expect(decoded.containsKey('IMG_003'), isFalse);
     });
 
@@ -100,7 +111,7 @@ void main() {
         'A': CullFlag.undecided,
       });
 
-      await session.save(tmp);
+      await saveFolder(session);
 
       final file = File(p.join(tmp.path, 'cull_session.json'));
       final decoded = jsonDecode(await file.readAsString()) as Map;
@@ -108,12 +119,14 @@ void main() {
     });
 
     test('save failure is silent (no throw)', () async {
-      // Use a directory that doesn't exist -> save should not throw
       final nonExist = Directory(p.join(tmp.path, 'non_existent_dir'));
       final session = CullSession({'A': CullFlag.keep});
 
-      // Should complete without throwing
-      await expectLater(session.save(nonExist), completes);
+      await expectLater(
+        saveFolder(session, LocalFolder(nonExist.path)),
+        completes,
+      );
+      expect(nonExist.existsSync(), isFalse);
     });
   });
 
@@ -125,8 +138,8 @@ void main() {
         'photo3': CullFlag.keep,
       });
 
-      await original.save(tmp);
-      final loaded = await CullSession.load(tmp);
+      await saveFolder(original);
+      final loaded = await loadFolder();
 
       expect(loaded.flagFor('photo1'), CullFlag.keep);
       expect(loaded.flagFor('photo2'), CullFlag.skip);
@@ -138,16 +151,15 @@ void main() {
         'DSC_0001': CullFlag.keep,
         'DSC_0002': CullFlag.skip,
       });
-      await session.save(tmp);
+      await saveFolder(session);
 
       final file = File(p.join(tmp.path, 'cull_session.json'));
       final raw = await file.readAsString();
       final decoded = jsonDecode(raw) as Map<String, dynamic>;
 
-      // Exact format check matching Python {"stem": "keep"|"skip"}
       expect(decoded['DSC_0001'], 'keep');
       expect(decoded['DSC_0002'], 'skip');
-      expect(decoded.length, 2); // No extra fields
+      expect(decoded.length, 2);
     });
   });
 

@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'storage/storage_gateway.dart';
 
 /// Decision flag for a photo during culling.
 enum CullFlag { undecided, keep, skip }
@@ -6,8 +6,8 @@ enum CullFlag { undecided, keep, skip }
 /// A RAW file paired with an optional companion JPG.
 class PhotoPair {
   final String stem;
-  final File raw;
-  final File? jpg;
+  final StorageEntry raw;
+  final StorageEntry? jpg;
 
   const PhotoPair({
     required this.stem,
@@ -16,7 +16,8 @@ class PhotoPair {
   });
 
   @override
-  String toString() => 'PhotoPair(stem: $stem, raw: ${raw.path}, jpg: ${jpg?.path})';
+  String toString() =>
+      'PhotoPair(stem: $stem, raw: ${raw.name}, jpg: ${jpg?.name})';
 }
 
 /// Progress update emitted during sorting.

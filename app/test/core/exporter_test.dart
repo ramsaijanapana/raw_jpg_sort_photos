@@ -3,7 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:photo_sorter/core/exporter.dart';
 import 'package:photo_sorter/core/cull_session.dart';
+import 'package:photo_sorter/core/folder_ref.dart';
 import 'package:photo_sorter/core/models.dart';
+import 'package:photo_sorter/core/storage/io_storage_gateway.dart';
+import 'package:photo_sorter/core/storage/storage_gateway.dart';
 
 void main() {
   late Directory src;
@@ -26,17 +29,50 @@ void main() {
     return f;
   }
 
+  StorageEntry entryFor(File file) {
+    return StorageEntry(
+      folder: LocalFolder(src.path),
+      name: p.basename(file.path),
+      mimeType: 'application/octet-stream',
+      isDirectory: false,
+      localPath: file.path,
+    );
+  }
+
   Future<PhotoPair> makePair({
     required String stem,
     required String rawExt,
     String? jpgExt,
   }) async {
-    final rawFile = await createFile(p.join(src.path, '$stem$rawExt'), 'raw_content');
+    final rawFile =
+        await createFile(p.join(src.path, '$stem$rawExt'), 'raw_content');
     File? jpgFile;
     if (jpgExt != null) {
-      jpgFile = await createFile(p.join(src.path, '$stem$jpgExt'), 'jpg_content');
+      jpgFile =
+          await createFile(p.join(src.path, '$stem$jpgExt'), 'jpg_content');
     }
-    return PhotoPair(stem: stem, raw: rawFile, jpg: jpgFile);
+    return PhotoPair(
+      stem: stem,
+      raw: entryFor(rawFile),
+      jpg: jpgFile == null ? null : entryFor(jpgFile),
+    );
+  }
+
+  Future<ExportResult> export({
+    required List<PhotoPair> pairs,
+    required CullSession session,
+    required bool includeJpgs,
+    Directory? destination,
+    StorageGateway? gateway,
+  }) {
+    return exportKept(
+      source: LocalFolder(src.path),
+      destination: LocalFolder((destination ?? dest).path),
+      gateway: gateway ?? IoStorageGateway(),
+      pairs: pairs,
+      session: session,
+      includeJpgs: includeJpgs,
+    );
   }
 
   group('exportKept', () {
@@ -44,9 +80,7 @@ void main() {
       final pair = await makePair(stem: 'DSC_0001', rawExt: '.arw');
       final session = CullSession({'DSC_0001': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
@@ -57,12 +91,11 @@ void main() {
     });
 
     test('copies kept RAW and JPG when includeJpgs=true', () async {
-      final pair = await makePair(stem: 'DSC_0002', rawExt: '.nef', jpgExt: '.jpg');
+      final pair =
+          await makePair(stem: 'DSC_0002', rawExt: '.nef', jpgExt: '.jpg');
       final session = CullSession({'DSC_0002': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: true,
@@ -74,12 +107,11 @@ void main() {
     });
 
     test('respects includeJpgs=false: only copies RAW', () async {
-      final pair = await makePair(stem: 'DSC_0003', rawExt: '.cr2', jpgExt: '.jpg');
+      final pair =
+          await makePair(stem: 'DSC_0003', rawExt: '.cr2', jpgExt: '.jpg');
       final session = CullSession({'DSC_0003': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
@@ -98,12 +130,9 @@ void main() {
       final session = CullSession({
         'DSC_0004': CullFlag.keep,
         'DSC_0005': CullFlag.skip,
-        // DSC_0006 is undecided
       });
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair1, pair2, pair3],
         session: session,
         includeJpgs: false,
@@ -116,12 +145,11 @@ void main() {
     });
 
     test('skips skip-flagged pairs', () async {
-      final pair = await makePair(stem: 'DSC_0007', rawExt: '.nef', jpgExt: '.jpg');
+      final pair =
+          await makePair(stem: 'DSC_0007', rawExt: '.nef', jpgExt: '.jpg');
       final session = CullSession({'DSC_0007': CullFlag.skip});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: true,
@@ -132,11 +160,9 @@ void main() {
 
     test('skips undecided pairs', () async {
       final pair = await makePair(stem: 'DSC_0008', rawExt: '.arw');
-      final session = CullSession(); // all undecided by default
+      final session = CullSession();
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
@@ -150,12 +176,11 @@ void main() {
       final pair = await makePair(stem: 'DSC_0009', rawExt: '.arw');
       final session = CullSession({'DSC_0009': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: newDest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
+        destination: newDest,
       );
 
       expect(result.copied, 1);
@@ -166,9 +191,7 @@ void main() {
       final pair = await makePair(stem: 'DSC_0010', rawExt: '.arw');
       final session = CullSession({'DSC_0010': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
@@ -177,21 +200,18 @@ void main() {
       expect(result.outputPath, dest.path);
     });
 
-    test('overwrites existing file (matches Python shutil.copy2 behavior)', () async {
+    test('overwrites existing file (matches Python shutil.copy2 behavior)',
+        () async {
       final pair = await makePair(stem: 'DSC_0011', rawExt: '.arw');
-      // Pre-create file at destination with different content
       await createFile(p.join(dest.path, 'DSC_0011.arw'), 'old_content');
 
       final session = CullSession({'DSC_0011': CullFlag.keep});
-      await exportKept(
-        source: src,
-        destination: dest,
+      await export(
         pairs: [pair],
         session: session,
         includeJpgs: false,
       );
 
-      // Should be overwritten with new content
       expect(
         File(p.join(dest.path, 'DSC_0011.arw')).readAsStringSync(),
         'raw_content',
@@ -199,42 +219,34 @@ void main() {
     });
 
     test('handles raw-only pair with includeJpgs=true gracefully', () async {
-      final pair = await makePair(stem: 'DSC_0012', rawExt: '.arw'); // no jpg
+      final pair = await makePair(stem: 'DSC_0012', rawExt: '.arw');
       final session = CullSession({'DSC_0012': CullFlag.keep});
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [pair],
         session: session,
         includeJpgs: true,
       );
 
-      // Only RAW copied since jpg is null
       expect(result.copied, 1);
     });
 
     test('skips a missing source raw, still copies the rest (P0-7)', () async {
-      // pair1: source RAW exists. pair2: source RAW deleted before export.
       final pair1 = await makePair(stem: 'GOOD', rawExt: '.arw');
       final pair2 = await makePair(stem: 'GONE', rawExt: '.arw');
-      // Remove the source for pair2 so its copy must be skipped, not abort all.
-      await pair2.raw.delete();
+      await File(pair2.raw.localPath!).delete();
 
       final session = CullSession({
         'GOOD': CullFlag.keep,
         'GONE': CullFlag.keep,
       });
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
-        pairs: [pair2, pair1], // missing one first to prove it doesn't abort
+      final result = await export(
+        pairs: [pair2, pair1],
         session: session,
         includeJpgs: false,
       );
 
-      // Only the existing source was copied; count reflects successes only.
       expect(result.copied, 1);
       expect(File(p.join(dest.path, 'GOOD.arw')).existsSync(), isTrue);
       expect(File(p.join(dest.path, 'GONE.arw')).existsSync(), isFalse);
@@ -243,15 +255,78 @@ void main() {
     test('empty pairs list returns zero copied', () async {
       final session = CullSession();
 
-      final result = await exportKept(
-        source: src,
-        destination: dest,
+      final result = await export(
         pairs: [],
         session: session,
         includeJpgs: true,
       );
 
       expect(result.copied, 0);
+    });
+
+    test('export overwrite preserves old dest on injected failure', () async {
+      final pair = await makePair(stem: 'FAIL_OW', rawExt: '.arw');
+      await createFile(p.join(dest.path, 'FAIL_OW.arw'), 'old_content');
+      final session = CullSession({'FAIL_OW': CullFlag.keep});
+      final failing = IoStorageGateway(
+        replaceFile: (temp, destPath) async {
+          throw FileSystemException('replace blocked', destPath);
+        },
+      );
+
+      await expectLater(
+        export(
+          pairs: [pair],
+          session: session,
+          includeJpgs: false,
+          gateway: failing,
+        ),
+        throwsA(isA<StorageException>()),
+      );
+      expect(
+        File(p.join(dest.path, 'FAIL_OW.arw')).readAsStringSync(),
+        'old_content',
+      );
+    });
+
+    test('export overwrite replaces dest on success', () async {
+      final pair = await makePair(stem: 'OK_OW', rawExt: '.arw');
+      await createFile(p.join(dest.path, 'OK_OW.arw'), 'old_content');
+      final session = CullSession({'OK_OW': CullFlag.keep});
+
+      final result = await export(
+        pairs: [pair],
+        session: session,
+        includeJpgs: false,
+      );
+      expect(result.copied, 1);
+      expect(
+        File(p.join(dest.path, 'OK_OW.arw')).readAsStringSync(),
+        'raw_content',
+      );
+    });
+
+    test('rejects LocalFolder content URI with invalid_arg before local I/O',
+        () async {
+      const uri = 'content://com.android.externalstorage.documents/tree/primary';
+      final pair = await makePair(stem: 'URI', rawExt: '.arw');
+      await expectLater(
+        exportKept(
+          source: const LocalFolder(uri),
+          destination: const LocalFolder(uri),
+          gateway: IoStorageGateway(),
+          pairs: [pair],
+          session: CullSession({'URI': CullFlag.keep}),
+          includeJpgs: false,
+        ),
+        throwsA(
+          isA<StorageException>().having(
+            (e) => e.code,
+            'code',
+            StorageException.invalidArg,
+          ),
+        ),
+      );
     });
   });
 }

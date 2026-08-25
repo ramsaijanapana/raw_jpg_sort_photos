@@ -1235,42 +1235,26 @@ class _Filmstrip extends ConsumerWidget {
           final flag = state.flags[pair.stem] ?? CullFlag.undecided;
           final isCurrent = i == state.index;
 
-          Widget thumb;
-          if (pair.jpg != null) {
-            // JPG pair: use engine ImageCache directly (no byte-LRU).
-            thumb = Image(
-              image: ResizeImage(
-                FileImage(pair.jpg!),
-                width: 128,
+          final thumbAsync = ref.watch(thumbnailProvider(pair.stem));
+          final thumb = thumbAsync.when(
+            loading: () => const Center(
+              child: SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
               ),
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              errorBuilder: (ctx, err, st) =>
-                  const Icon(Icons.broken_image, size: 24),
-            );
-          } else {
-            // RAW-only: use byte-LRU thumbnail.
-            final thumbAsync = ref.watch(thumbnailProvider(pair.stem));
-            thumb = thumbAsync.when(
-              loading: () => const Center(
-                child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-              error: (err, st) => const Icon(Icons.broken_image, size: 24),
-              data: (bytes) => bytes != null
-                  ? Image.memory(
-                      bytes,
-                      cacheWidth: 128,
-                      cacheHeight: 128,
-                      fit: BoxFit.cover,
-                      gaplessPlayback: true,
-                    )
-                  : const Icon(Icons.image_not_supported, size: 24),
-            );
-          }
+            ),
+            error: (err, st) => const Icon(Icons.broken_image, size: 24),
+            data: (bytes) => bytes != null
+                ? Image(
+                    image: ResizeImage(MemoryImage(bytes), width: 128),
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    errorBuilder: (ctx, err, st) =>
+                        const Icon(Icons.broken_image, size: 24),
+                  )
+                : const Icon(Icons.image_not_supported, size: 24),
+          );
 
           final cs = Theme.of(context).colorScheme;
           final borderColor = isCurrent

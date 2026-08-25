@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:collection';
-import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -9,10 +8,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/cull_session.dart';
 import '../core/exif_reader.dart';
 import '../core/exporter.dart';
+import '../core/folder_ref.dart';
 import '../core/models.dart';
 import '../core/raw_preview/raw_preview_extractor.dart';
 import '../core/scanner.dart';
 import '../core/storage/byte_range_reader.dart';
+import '../core/storage/io_storage_gateway.dart';
+import '../core/storage/storage_gateway.dart';
 import '../services/prefs_service.dart';
 
 // ---------------------------------------------------------------------------
@@ -30,7 +32,7 @@ class CullState {
     this.error,
   });
 
-  final Directory? dir;
+  final FolderRef? dir;
   final List<PhotoPair> pairs;
   final Map<String, CullFlag> flags;
   final int index;
@@ -48,7 +50,7 @@ class CullState {
     Object? error = _sentinel,
   }) {
     return CullState(
-      dir: dir == _sentinel ? this.dir : dir as Directory?,
+      dir: dir == _sentinel ? this.dir : dir as FolderRef?,
       pairs: pairs ?? this.pairs,
       flags: flags ?? this.flags,
       index: index ?? this.index,
@@ -190,13 +192,14 @@ final previewProvider =
     final pair = _lookupPair(ref, key.stem);
     if (pair == null) return null;
 
+    final gateway = ref.read(cullControllerProvider.notifier).storageGateway;
     Uint8List? bytes;
     if (key.mode == 'jpg' && pair.jpg != null) {
-      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
+      bytes = await GatewayByteRangeReader(gateway, pair.jpg!).readAll();
     } else {
       bytes = await extractPreview(
-        IoByteRangeReader.fromFile(pair.raw),
-        name: pair.raw.path,
+        GatewayByteRangeReader(gateway, pair.raw),
+        name: pair.raw.name,
       );
     }
 
@@ -220,13 +223,14 @@ final thumbnailProvider =
     final pair = _lookupPair(ref, stem);
     if (pair == null) return null;
 
+    final gateway = ref.read(cullControllerProvider.notifier).storageGateway;
     Uint8List? bytes;
     if (pair.jpg != null) {
-      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
+      bytes = await GatewayByteRangeReader(gateway, pair.jpg!).readAll();
     } else {
       bytes = await extractPreview(
-        IoByteRangeReader.fromFile(pair.raw),
-        name: pair.raw.path,
+        GatewayByteRangeReader(gateway, pair.raw),
+        name: pair.raw.name,
       );
     }
 
@@ -248,12 +252,13 @@ final exifProvider =
     final pair = _lookupPair(ref, stem);
     if (pair == null) return null;
 
+    final gateway = ref.read(cullControllerProvider.notifier).storageGateway;
     Uint8List bytes;
     if (pair.jpg != null) {
-      bytes = await IoByteRangeReader.fromFile(pair.jpg!).readAll();
+      bytes = await GatewayByteRangeReader(gateway, pair.jpg!).readAll();
     } else {
       // Read only first 512 KB for EXIF header parsing.
-      final reader = IoByteRangeReader.fromFile(pair.raw);
+      final reader = GatewayByteRangeReader(gateway, pair.raw);
       final size = await reader.length();
       final n = size < 512 * 1024 ? size : 512 * 1024;
       bytes = await reader.read(0, n);
@@ -280,6 +285,10 @@ PhotoPair? _lookupPair(Ref ref, String stem) {
 class CullController extends Notifier<CullState> {
   Timer? _advanceTimer;
   int _openGeneration = 0;
+  final StorageGateway _gateway = IoStorageGateway();
+
+  /// Gateway owned by this cull/review flow.
+  StorageGateway get storageGateway => _gateway;
 
   /// Undo stack: each entry records the stem, previous flag, and index at the
   /// time of the change. Capped at 50 entries.
@@ -299,15 +308,15 @@ class CullController extends Notifier<CullState> {
     state = state.copyWith(loading: true, error: null);
 
     try {
-      final dir = Directory(path);
-      final pairs = await scanPairs(dir);
+      final folder = LocalFolder(path);
+      final pairs = await scanPairs(folder, gateway: _gateway);
       if (gen != _openGeneration) return;
       pairs.sort((a, b) => a.stem.compareTo(b.stem));
-      final session = await CullSession.load(dir);
+      final session = await CullSession.load(folder, gateway: _gateway);
       if (gen != _openGeneration) return;
 
       state = state.copyWith(
-        dir: dir,
+        dir: folder,
         pairs: pairs,
         flags: Map.unmodifiable(Map<String, CullFlag>.from(session.flags)),
         index: 0,
@@ -399,7 +408,8 @@ class CullController extends Notifier<CullState> {
     final session = _buildSession();
     return exportKept(
       source: dir,
-      destination: Directory(destinationPath),
+      destination: LocalFolder(destinationPath),
+      gateway: _gateway,
       pairs: state.pairs,
       session: session,
       includeJpgs: includeJpgs,
@@ -434,7 +444,7 @@ class CullController extends Notifier<CullState> {
     final dir = state.dir;
     if (dir == null) return;
     final session = _buildSession();
-    await session.save(dir);
+    await session.save(dir, gateway: _gateway);
   }
 
   CullSession _buildSession() {

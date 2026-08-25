@@ -1,36 +1,43 @@
-import 'dart:io';
 import 'package:path/path.dart' as p;
+
 import 'constants.dart';
+import 'folder_ref.dart';
 import 'models.dart';
+import 'storage/storage_gateway.dart';
 
 /// Scans [folder] for RAW files.
 ///
 /// Includes files in [folder] itself and in [folder/RAW/] if that subdirectory
 /// exists. Results are sorted by file name (base name, not full path).
-Future<List<File>> scanRaws(Directory folder) async {
-  final results = <File>[];
+Future<List<StorageEntry>> scanRaws(
+  FolderRef folder, {
+  required StorageGateway gateway,
+}) async {
+  final results = <StorageEntry>[];
 
-  // Scan root folder
-  if (await folder.exists()) {
-    await for (final entity in folder.list(recursive: false)) {
-      if (entity is File && isRaw(entity.path)) {
-        results.add(entity);
+  if (await gateway.exists(folder)) {
+    final children = await gateway.listChildren(folder);
+    for (final entry in children) {
+      if (!entry.isDirectory && isRaw(entry.name)) {
+        results.add(entry);
       }
     }
   }
 
-  // Also scan folder/RAW/ subdirectory if it exists
-  final rawSub = Directory(p.join(folder.path, 'RAW'));
-  if (await rawSub.exists()) {
-    await for (final entity in rawSub.list(recursive: false)) {
-      if (entity is File && isRaw(entity.path)) {
-        results.add(entity);
+  final rawSub = await gateway.childByName(folder, 'RAW');
+  if (rawSub != null && rawSub.isDirectory) {
+    final rawChildren = await gateway.listChildren(
+      folder,
+      childDocumentId: 'RAW',
+    );
+    for (final entry in rawChildren) {
+      if (!entry.isDirectory && isRaw(entry.name)) {
+        results.add(entry);
       }
     }
   }
 
-  // Sort by base file name (case-sensitive, matches Python behavior)
-  results.sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+  results.sort((a, b) => a.name.compareTo(b.name));
   return results;
 }
 
@@ -41,20 +48,27 @@ Future<List<File>> scanRaws(Directory folder) async {
 /// 2. [folder/JPG/] subdirectory
 ///
 /// Extensions tried (case-sensitive): .jpg, .JPG, .jpeg, .JPEG
-Future<List<PhotoPair>> scanPairs(Directory folder) async {
-  final raws = await scanRaws(folder);
-  final jpgSub = Directory(p.join(folder.path, 'JPG'));
-
+Future<List<PhotoPair>> scanPairs(
+  FolderRef folder, {
+  required StorageGateway gateway,
+}) async {
+  final raws = await scanRaws(folder, gateway: gateway);
   final pairs = <PhotoPair>[];
+
   for (final rawFile in raws) {
-    final stem = p.basenameWithoutExtension(rawFile.path);
-    File? foundJpg;
+    final stem = p.basenameWithoutExtension(rawFile.name);
+    StorageEntry? foundJpg;
 
     outer:
     for (final ext in const ['.jpg', '.JPG', '.jpeg', '.JPEG']) {
-      for (final dir in [folder, jpgSub]) {
-        final candidate = File(p.join(dir.path, '$stem$ext'));
-        if (await candidate.exists()) {
+      final name = '$stem$ext';
+      for (final parentId in const [null, 'JPG']) {
+        final candidate = await gateway.childByName(
+          folder,
+          name,
+          parentDocumentId: parentId,
+        );
+        if (candidate != null && !candidate.isDirectory) {
           foundJpg = candidate;
           break outer;
         }

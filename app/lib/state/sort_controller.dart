@@ -1,9 +1,9 @@
-import 'dart:io';
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/folder_ref.dart';
 import '../core/models.dart';
 import '../core/sorter.dart';
+import '../core/storage/io_storage_gateway.dart';
 import '../services/file_pick_service.dart';
 import '../services/prefs_service.dart';
 
@@ -60,6 +60,7 @@ class SortUiState {
 
 class SortController extends Notifier<SortUiState> {
   bool _cancelRequested = false;
+  final IoStorageGateway _gateway = IoStorageGateway();
 
   @override
   SortUiState build() {
@@ -145,8 +146,8 @@ class SortController extends Notifier<SortUiState> {
       return;
     }
 
-    final inputDir = Directory(inputPath);
-    final outputDir = Directory(state.outputPath ?? inputPath);
+    final inputFolder = LocalFolder(inputPath);
+    final outputFolder = LocalFolder(state.outputPath ?? inputPath);
 
     _cancelRequested = false;
     state = state.copyWith(
@@ -158,8 +159,9 @@ class SortController extends Notifier<SortUiState> {
 
     try {
       final result = await sortPhotos(
-        input: inputDir,
-        output: outputDir,
+        input: inputFolder,
+        output: outputFolder,
+        gateway: _gateway,
         onProgress: (p) {
           state = state.copyWith(phase: SortPhase.sorting, progress: p);
         },

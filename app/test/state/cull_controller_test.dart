@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:photo_sorter/core/folder_ref.dart';
 import 'package:photo_sorter/core/models.dart';
 import 'package:photo_sorter/services/prefs_service.dart';
 import 'package:photo_sorter/state/cull_controller.dart';
@@ -139,7 +140,7 @@ void main() {
       expect(state.pairs.map((e) => e.stem).toList()..sort(),
           ['B_001', 'B_002', 'B_003']);
       expect(state.flags['B_001'], CullFlag.keep);
-      expect(state.dir!.path, dirB.path);
+      expect((state.dir as LocalFolder).path, dirB.path);
     });
   });
 

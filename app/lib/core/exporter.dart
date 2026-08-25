@@ -1,7 +1,10 @@
 import 'dart:io';
-import 'package:path/path.dart' as p;
+
+import '../services/local_path_classifier.dart';
 import 'cull_session.dart';
+import 'folder_ref.dart';
 import 'models.dart';
+import 'storage/storage_gateway.dart';
 
 /// Exports kept photos to [destination].
 ///
@@ -11,39 +14,75 @@ import 'models.dart';
 ///
 /// Overwrites existing files at the destination (matches Python shutil.copy2
 /// behavior). Returns an [ExportResult] with the count of files copied.
+///
+/// [source] is unused and kept for call-site stability.
 Future<ExportResult> exportKept({
-  required Directory source,
-  required Directory destination,
+  required FolderRef source,
+  required FolderRef destination,
+  required StorageGateway gateway,
   required List<PhotoPair> pairs,
   required CullSession session,
   required bool includeJpgs,
 }) async {
-  await destination.create(recursive: true);
+  await _ensureLocalRoot(destination, gateway);
 
   int copied = 0;
 
   for (final pair in pairs) {
     if (session.flagFor(pair.stem) != CullFlag.keep) continue;
 
-    // Copy RAW file — skip silently if it no longer exists on disk.
-    if (await pair.raw.exists()) {
-      final rawDest = File(p.join(destination.path, p.basename(pair.raw.path)));
-      await pair.raw.copy(rawDest.path);
-      copied++;
-    }
-
-    // Copy JPG if requested and available — skip silently if missing.
+    copied += await _copyIfPresent(gateway, pair.raw, destination);
     if (includeJpgs && pair.jpg != null) {
-      if (await pair.jpg!.exists()) {
-        final jpgDest = File(p.join(destination.path, p.basename(pair.jpg!.path)));
-        await pair.jpg!.copy(jpgDest.path);
-        copied++;
-      }
+      copied += await _copyIfPresent(gateway, pair.jpg!, destination);
     }
   }
 
   return ExportResult(
     copied: copied,
-    outputPath: destination.path,
+    outputPath: destination is LocalFolder ? destination.path : '',
   );
+}
+
+Future<int> _copyIfPresent(
+  StorageGateway gateway,
+  StorageEntry file,
+  FolderRef destination,
+) async {
+  try {
+    await gateway.copyFile(
+      file,
+      destination,
+      file.name,
+      overwrite: true,
+    );
+    return 1;
+  } on StorageException catch (e) {
+    if (e.code == StorageException.notFound) return 0;
+    rethrow;
+  }
+}
+
+/// Creates a missing local export root after Task 03 classification.
+///
+/// Non-local / unclassified references fail closed with [invalid_arg].
+/// Never constructs [File] / [Directory] from `content://`.
+Future<void> _ensureLocalRoot(
+  FolderRef folder,
+  StorageGateway gateway,
+) async {
+  if (await gateway.exists(folder)) return;
+  if (folder is! LocalFolder) {
+    throw const StorageException(
+      StorageException.invalidArg,
+      'cannot create a non-local output folder',
+    );
+  }
+  final classified = classifyLocalDirectoryPath(folder.path);
+  if (classified == null || classified != folder.path) {
+    throw const StorageException(
+      StorageException.invalidArg,
+      'refused non-local path',
+    );
+  }
+  await Directory(folder.path).create(recursive: true);
 }

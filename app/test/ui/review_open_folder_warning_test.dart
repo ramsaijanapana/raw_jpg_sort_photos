@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:photo_sorter/core/folder_ref.dart';
 import 'package:photo_sorter/main.dart';
 import 'package:photo_sorter/services/file_pick_service.dart';
 import 'package:photo_sorter/services/prefs_service.dart';
@@ -122,7 +123,7 @@ void main() {
 
       final before = container.read(cullControllerProvider);
       expect(before.pairs.length, 2);
-      expect(before.dir?.path, tmp.path);
+      expect((before.dir as LocalFolder).path, tmp.path);
 
       await tester.tap(find.widgetWithText(FilledButton, 'Open Folder'));
       await tester.pump();
@@ -132,11 +133,77 @@ void main() {
       expect(find.text(directoryAccessWarning), findsOneWidget);
 
       final after = container.read(cullControllerProvider);
-      expect(after.dir?.path, before.dir?.path);
+      expect(
+        (after.dir as LocalFolder).path,
+        (before.dir as LocalFolder).path,
+      );
       expect(after.pairs.length, before.pairs.length);
       expect(after.index, before.index);
       expect(after.loading, isFalse);
       expect(after.flags, before.flags);
     },
   );
+
+  testWidgets(
+    'Review JPG filmstrip has no FileImage and uses the thumbnail/bytes seam',
+    (tester) async {
+      final tmp = Directory.systemTemp.createTempSync('review_filmstrip_');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      File(p.join(tmp.path, 'IMG_001.ARW')).writeAsBytesSync([0, 1, 2, 3]);
+      File(p.join(tmp.path, 'IMG_001.jpg')).writeAsBytesSync([0, 1, 2, 3]);
+
+      tester.view.physicalSize =
+          const Size(1100, 760) * tester.view.devicePixelRatio;
+      final prefs = await _prefs();
+      final container = ProviderContainer(
+        overrides: [
+          prefsServiceProvider.overrideWithValue(prefs),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const PhotoSorterApp(),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.tap(find.text('Review').last);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.runAsync(() async {
+        await container.read(cullControllerProvider.notifier).openFolder(
+              tmp.path,
+            );
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final state = container.read(cullControllerProvider);
+      expect(state.pairs.length, 1);
+      expect(state.pairs.single.jpg, isNotNull);
+
+      expect(find.text('IMG_001'), findsWidgets);
+      expect(
+        find.byType(CircularProgressIndicator).evaluate().isNotEmpty ||
+            find.byType(Image).evaluate().isNotEmpty ||
+            find.byIcon(Icons.broken_image).evaluate().isNotEmpty ||
+            find.byIcon(Icons.image_not_supported).evaluate().isNotEmpty,
+        isTrue,
+      );
+      for (final image in tester.widgetList<Image>(find.byType(Image))) {
+        expect(_containsFileImage(image.image), isFalse);
+      }
+    },
+  );
+}
+
+bool _containsFileImage(ImageProvider provider) {
+  if (provider is FileImage) return true;
+  if (provider is ResizeImage) {
+    return _containsFileImage(provider.imageProvider);
+  }
+  return false;
 }

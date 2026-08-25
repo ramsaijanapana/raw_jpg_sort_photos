@@ -2,8 +2,10 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:photo_sorter/core/folder_ref.dart';
 import 'package:photo_sorter/core/models.dart';
 import 'package:photo_sorter/core/sorter.dart';
+import 'package:photo_sorter/core/storage/io_storage_gateway.dart';
 
 void main() {
   late Directory tmp;
@@ -23,44 +25,53 @@ void main() {
     return f;
   }
 
+  Future<SortResult> sort(
+    Directory input,
+    Directory output, {
+    bool Function()? shouldCancel,
+  }) {
+    return sortPhotos(
+      input: LocalFolder(input.path),
+      output: LocalFolder(output.path),
+      gateway: IoStorageGateway(),
+      shouldCancel: shouldCancel,
+    );
+  }
+
   group('sortPhotos — shouldCancel', () {
     test('shouldCancel true immediately → cancelled:true, 0 processed', () async {
       await createFile(p.join(tmp.path, 'a.arw'));
       await createFile(p.join(tmp.path, 'b.nef'));
       await createFile(p.join(tmp.path, 'c.jpg'));
 
-      final result = await sortPhotos(
-        input: tmp,
-        output: tmp,
-        shouldCancel: () => true, // always cancel
+      final result = await sort(
+        tmp,
+        tmp,
+        shouldCancel: () => true,
       );
 
       expect(result.cancelled, isTrue);
-      // No files were processed.
       expect(result.rawCount + result.jpgCount + result.skipped, 0);
     });
 
     test('shouldCancel after 2 files → partial counts, remaining untouched',
         () async {
-      // Create 5 files — cancel fires after 2 iterations.
       final fileNames = ['a.arw', 'b.nef', 'c.cr2', 'd.jpg', 'e.jpeg'];
       for (final name in fileNames) {
         await createFile(p.join(tmp.path, name));
       }
 
       int callCount = 0;
-      final result = await sortPhotos(
-        input: tmp,
-        output: tmp,
+      final result = await sort(
+        tmp,
+        tmp,
         shouldCancel: () {
-          // Cancel starting from the 3rd check (i.e. after 2 files moved).
           callCount++;
           return callCount > 2;
         },
       );
 
       expect(result.cancelled, isTrue);
-      // Partial: some files were sorted, but not all.
       final processed = result.rawCount + result.jpgCount + result.skipped;
       expect(processed, lessThan(fileNames.length));
       expect(processed, greaterThan(0));
@@ -70,9 +81,9 @@ void main() {
       await createFile(p.join(tmp.path, 'photo.arw'));
       await createFile(p.join(tmp.path, 'photo.jpg'));
 
-      final result = await sortPhotos(
-        input: tmp,
-        output: tmp,
+      final result = await sort(
+        tmp,
+        tmp,
         shouldCancel: () => false,
       );
 
@@ -84,10 +95,7 @@ void main() {
     test('null shouldCancel → normal completion (backward compat)', () async {
       await createFile(p.join(tmp.path, 'photo.nef'));
 
-      final result = await sortPhotos(
-        input: tmp,
-        output: tmp,
-      );
+      final result = await sort(tmp, tmp);
 
       expect(result.cancelled, isFalse);
       expect(result.rawCount, 1);
