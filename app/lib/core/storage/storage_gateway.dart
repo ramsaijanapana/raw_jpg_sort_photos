@@ -17,10 +17,14 @@ class StorageException implements Exception {
   const StorageException(this.code, this.message, [this.details]);
 
   static const alreadyExists = 'already_exists';
+  static const cancelled = 'cancelled';
   static const incompleteMove = 'incomplete_move';
   static const invalidArg = 'invalid_arg';
   static const ioFailure = 'io_failure';
   static const notFound = 'not_found';
+  static const permissionDenied = 'permission_denied';
+  static const quota = 'quota';
+  static const readOnly = 'read_only';
   static const unsupported = 'unsupported';
 
   final String code;
@@ -35,7 +39,8 @@ class StorageException implements Exception {
 ///
 /// [localPath] is set only for local entries. [documentId] is set only when
 /// the backing store has a stable document id (SAF). Local entries leave it
-/// null and use [localPath].
+/// null and use [localPath]. Equality uses identity fields only: folder,
+/// name, documentId, localPath, and isDirectory.
 class StorageEntry {
   const StorageEntry({
     required this.folder,
@@ -65,8 +70,6 @@ class StorageEntry {
           name == other.name &&
           documentId == other.documentId &&
           localPath == other.localPath &&
-          mimeType == other.mimeType &&
-          size == other.size &&
           isDirectory == other.isDirectory;
 
   @override
@@ -75,8 +78,6 @@ class StorageEntry {
         name,
         documentId,
         localPath,
-        mimeType,
-        size,
         isDirectory,
       );
 }

@@ -20,6 +20,8 @@ final class LocalFolder extends FolderRef {
 }
 
 /// An Android document tree. Channels and persistable grants come later.
+///
+/// [displayName] is a presentation label and is not part of value identity.
 final class SafTree extends FolderRef {
   const SafTree({
     required this.treeUri,
@@ -35,9 +37,8 @@ final class SafTree extends FolderRef {
       identical(this, other) ||
       other is SafTree &&
           treeUri == other.treeUri &&
-          documentId == other.documentId &&
-          displayName == other.displayName;
+          documentId == other.documentId;
 
   @override
-  int get hashCode => Object.hash(treeUri, documentId, displayName);
+  int get hashCode => Object.hash(treeUri, documentId);
 }
