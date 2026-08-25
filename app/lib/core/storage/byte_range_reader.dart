@@ -130,14 +130,14 @@ class IoByteRangeReader implements CacheMaterializingByteRangeReader {
   }
 
   @override
-  Future<Uint8List> read(int offset, int length) {
+  Future<Uint8List> read(int offset, int length) async {
     if (offset < 0 || length < 0) {
       throw const StorageException(
         StorageException.invalidArg,
         'offset and length must be non-negative',
       );
     }
-    return _guardIo(() async {
+    return await _guardIo(() async {
       final raf = _raf;
       if (raf != null) {
         return _readFromRaf(raf, offset, length);

@@ -339,6 +339,33 @@ void main() {
       );
     });
 
+    test('invalid ranges complete the returned Future with invalidArg',
+        () async {
+      final file = File(p.join(tmp.path, 'async_bounds.bin'));
+      await file.writeAsBytes([1, 2, 3]);
+      final reader = IoByteRangeReader.fromFile(file);
+
+      late final Future<Uint8List> negativeOffset;
+      expect(() {
+        negativeOffset = reader.read(-1, 1);
+      }, returnsNormally);
+      expect(negativeOffset, isA<Future<Uint8List>>());
+      await expectLater(
+        negativeOffset,
+        throwsStorage(StorageException.invalidArg),
+      );
+
+      late final Future<Uint8List> negativeLength;
+      expect(() {
+        negativeLength = reader.read(0, -1);
+      }, returnsNormally);
+      expect(negativeLength, isA<Future<Uint8List>>());
+      await expectLater(
+        negativeLength,
+        throwsStorage(StorageException.invalidArg),
+      );
+    });
+
     test('deleteCache refuses a path it did not issue', () async {
       final file = File(p.join(tmp.path, 'src.bin'));
       await file.writeAsBytes([1]);
