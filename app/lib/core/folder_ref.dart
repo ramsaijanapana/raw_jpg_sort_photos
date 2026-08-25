@@ -10,6 +10,13 @@ sealed class FolderRef {
 final class LocalFolder extends FolderRef {
   const LocalFolder(this.path);
   final String path;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) || other is LocalFolder && path == other.path;
+
+  @override
+  int get hashCode => path.hashCode;
 }
 
 /// An Android document tree. Channels and persistable grants come later.
@@ -22,4 +29,15 @@ final class SafTree extends FolderRef {
   final String treeUri;
   final String documentId;
   final String displayName;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SafTree &&
+          treeUri == other.treeUri &&
+          documentId == other.documentId &&
+          displayName == other.displayName;
+
+  @override
+  int get hashCode => Object.hash(treeUri, documentId, displayName);
 }
