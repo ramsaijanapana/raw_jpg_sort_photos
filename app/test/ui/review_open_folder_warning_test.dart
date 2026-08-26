@@ -1,15 +1,18 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:photo_sorter/core/folder_ref.dart';
+import 'package:photo_sorter/core/storage/storage_gateway.dart';
 import 'package:photo_sorter/main.dart';
 import 'package:photo_sorter/services/file_pick_service.dart';
 import 'package:photo_sorter/services/prefs_service.dart';
+import 'package:photo_sorter/services/saf/saf_channel.dart';
 import 'package:photo_sorter/state/cull_controller.dart';
 
 class _WarningPickService extends FilePickService {
@@ -198,6 +201,230 @@ void main() {
       }
     },
   );
+
+  testWidgets(
+    'Review SAF cancel changes nothing and shows no SnackBar',
+    (tester) async {
+      tester.view.physicalSize =
+          const Size(1100, 760) * tester.view.devicePixelRatio;
+      final prefs = await _prefs();
+      final harness = _ReviewSafHarness()..pickTree = null;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(SafChannel.channelName),
+        harness.handle,
+      );
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+          const MethodChannel(SafChannel.channelName),
+          null,
+        );
+      });
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            prefsServiceProvider.overrideWithValue(prefs),
+            filePickServiceProvider.overrideWithValue(
+              FilePickService(
+                safChannel: SafChannel(),
+                isAndroid: () => true,
+                pickLocalDirectory: ({String? dialogTitle}) async {
+                  fail('FilePicker must not run');
+                },
+              ),
+            ),
+          ],
+          child: const PhotoSorterApp(),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Review').last);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('Open a folder to start reviewing'), findsOneWidget);
+
+      await tester.tap(find.widgetWithText(FilledButton, 'Open Folder'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(find.byType(SnackBar), findsNothing);
+      expect(find.text('Open a folder to start reviewing'), findsOneWidget);
+      expect(find.textContaining('content://'), findsNothing);
+    },
+  );
+
+  testWidgets('Review SAF success uses folder not path', (tester) async {
+    tester.view.physicalSize =
+        const Size(1100, 760) * tester.view.devicePixelRatio;
+    final prefs = await _prefs();
+    final harness = _ReviewSafHarness()
+      ..pickTree = _treeMap
+      ..addTree();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel(SafChannel.channelName),
+      harness.handle,
+    );
+    addTearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(SafChannel.channelName),
+        null,
+      );
+    });
+    final container = ProviderContainer(
+      overrides: [
+        prefsServiceProvider.overrideWithValue(prefs),
+        filePickServiceProvider.overrideWithValue(
+          FilePickService(
+            safChannel: SafChannel(),
+            isAndroid: () => true,
+            pickLocalDirectory: ({String? dialogTitle}) async {
+              fail('FilePicker must not run');
+            },
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const PhotoSorterApp(),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('Review').last);
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.runAsync(() async {
+      await tester.tap(find.widgetWithText(FilledButton, 'Open Folder'));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    final state = container.read(cullControllerProvider);
+    expect(state.dir, isA<SafTree>());
+    expect(find.textContaining('content://'), findsNothing);
+  });
+
+  testWidgets(
+    'Review revoked Resume clears pref, warns, and does not treat URI as a path',
+    (tester) async {
+      const treeUri =
+          'content://com.android.externalstorage.documents/tree/primary%3ADCIM';
+      SharedPreferences.setMockInitialValues({'lastCullDir': treeUri});
+      final prefs = PrefsService(await SharedPreferences.getInstance());
+      final harness = _ReviewSafHarness()..hasPersisted = false;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+        const MethodChannel(SafChannel.channelName),
+        harness.handle,
+      );
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+          const MethodChannel(SafChannel.channelName),
+          null,
+        );
+      });
+      tester.view.physicalSize =
+          const Size(1100, 760) * tester.view.devicePixelRatio;
+      final container = ProviderContainer(
+        overrides: [
+          prefsServiceProvider.overrideWithValue(prefs),
+          filePickServiceProvider.overrideWithValue(
+            FilePickService(
+              safChannel: SafChannel(),
+              isAndroid: () => true,
+              pickLocalDirectory: ({String? dialogTitle}) async => null,
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await tester.pumpWidget(
+        UncontrolledProviderScope(
+          container: container,
+          child: const PhotoSorterApp(),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(find.text('Review').last);
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(prefs.lastCullDirIfExists, isNull);
+      expect(find.textContaining('Resume'), findsOneWidget);
+      expect(find.textContaining('Resume folder'), findsOneWidget);
+      expect(find.textContaining('content://'), findsNothing);
+
+      await tester.runAsync(() async {
+        await tester.tap(find.textContaining('Resume'));
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.byType(SnackBar), findsOneWidget);
+      expect(find.text(directoryAccessWarning), findsOneWidget);
+      expect(prefs.lastCullDir, isNull);
+      expect(find.text('Open a folder to start reviewing'), findsOneWidget);
+      expect(container.read(cullControllerProvider).pairs, isEmpty);
+      expect(container.read(cullControllerProvider).dir, isNull);
+      expect(find.textContaining('content://'), findsNothing);
+    },
+  );
+}
+
+const _treeMap = <String, Object?>{
+  'treeUri':
+      'content://com.android.externalstorage.documents/tree/primary%3ADCIM',
+  'documentId': 'primary:DCIM',
+  'displayName': 'DCIM',
+};
+
+class _ReviewSafHarness {
+  Object? pickTree = _treeMap;
+  bool hasPersisted = true;
+  final Map<String, List<Map<String, Object?>>> children =
+      <String, List<Map<String, Object?>>>{};
+
+  void addTree() {
+    children['primary:DCIM'] = <Map<String, Object?>>[];
+  }
+
+  Future<Object?> handle(MethodCall call) async {
+    final args = call.arguments is Map
+        ? Map<String, Object?>.from(call.arguments as Map)
+        : <String, Object?>{};
+    switch (call.method) {
+      case 'pickTree':
+        return pickTree;
+      case 'takePersistable':
+        return <String, Object?>{'ok': true};
+      case 'hasPersisted':
+        return <String, Object?>{'ok': hasPersisted};
+      case 'persistedTrees':
+        return <String, Object?>{'trees': <Object>[]};
+      case 'listChildren':
+        final id = args['documentId'] as String? ?? '';
+        return <String, Object?>{
+          'entries': children[id] ?? <Object>[],
+        };
+      case 'childByName':
+        return <String, Object?>{'entry': null};
+      default:
+        throw PlatformException(
+          code: StorageException.ioFailure,
+          message: call.method,
+        );
+    }
+  }
 }
 
 bool _containsFileImage(ImageProvider provider) {

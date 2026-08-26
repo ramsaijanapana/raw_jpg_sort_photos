@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import '../../core/folder_ref.dart';
+import '../../services/file_pick_service.dart';
 import '../../state/sort_controller.dart';
 
 class SortScreen extends ConsumerWidget {
@@ -47,7 +49,7 @@ class SortScreen extends ConsumerWidget {
 
                 // Folder pick card (hero + drop zone)
                 _FolderPickCard(
-                  inputPath: state.inputPath,
+                  folder: state.inputFolder,
                   onTap: sorting ? null : () => ctrl.pickInput(),
                   onDropPath: sorting ? null : (path) => ctrl.setInput(path),
                 ),
@@ -55,7 +57,7 @@ class SortScreen extends ConsumerWidget {
 
                 // Output folder row
                 _OutputRow(
-                  outputPath: state.outputPath,
+                  folder: state.outputFolder,
                   onBrowse: sorting ? null : () => ctrl.pickOutput(),
                 ),
                 const SizedBox(height: 24),
@@ -69,7 +71,7 @@ class SortScreen extends ConsumerWidget {
                           child: const Text('Cancel'),
                         )
                       : FilledButton(
-                          onPressed: state.inputPath == null
+                          onPressed: state.inputFolder == null
                               ? null
                               : () => ctrl.start(),
                           child: const Text('Sort Photos'),
@@ -77,7 +79,7 @@ class SortScreen extends ConsumerWidget {
                 ),
 
                 // "Choose a folder to enable" hint when disabled
-                if (!sorting && state.inputPath == null) ...[
+                if (!sorting && state.inputFolder == null) ...[
                   const SizedBox(height: 8),
                   Text(
                     'Choose a folder to enable',
@@ -126,12 +128,12 @@ class SortScreen extends ConsumerWidget {
 
 class _FolderPickCard extends StatefulWidget {
   const _FolderPickCard({
-    required this.inputPath,
+    required this.folder,
     required this.onTap,
     required this.onDropPath,
   });
 
-  final String? inputPath;
+  final FolderRef? folder;
   final VoidCallback? onTap;
   final void Function(String path)? onDropPath;
 
@@ -163,7 +165,7 @@ class _FolderPickCardState extends State<_FolderPickCard> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final hasFolder = widget.inputPath != null;
+    final hasFolder = widget.folder != null;
 
     Widget card = AnimatedContainer(
       duration: const Duration(milliseconds: 150),
@@ -191,7 +193,7 @@ class _FolderPickCardState extends State<_FolderPickCard> {
               ? _DropHint(cs: cs)
               : hasFolder
                   ? _FolderContent(
-                      inputPath: widget.inputPath!,
+                      folder: widget.folder!,
                       theme: theme,
                       cs: cs,
                     )
@@ -253,16 +255,18 @@ class _DropHint extends StatelessWidget {
 
 class _FolderContent extends StatelessWidget {
   const _FolderContent({
-    required this.inputPath,
+    required this.folder,
     required this.theme,
     required this.cs,
   });
-  final String inputPath;
+  final FolderRef folder;
   final ThemeData theme;
   final ColorScheme cs;
 
   @override
   Widget build(BuildContext context) {
+    final title = FilePickService.folderDisplayName(folder);
+    final subtitle = folder is LocalFolder ? folder.path : null;
     return Row(
       children: [
         Container(
@@ -280,19 +284,21 @@ class _FolderContent extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                p.basename(inputPath),
+                title,
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.bold,
                 ),
               ),
-              const SizedBox(height: 2),
-              Text(
-                inputPath,
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: cs.onSurfaceVariant,
+              if (subtitle != null) ...[
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                  overflow: TextOverflow.ellipsis,
                 ),
-                overflow: TextOverflow.ellipsis,
-              ),
+              ],
             ],
           ),
         ),
@@ -356,15 +362,20 @@ class _EmptyContent extends StatelessWidget {
 }
 
 class _OutputRow extends StatelessWidget {
-  const _OutputRow({required this.outputPath, required this.onBrowse});
+  const _OutputRow({required this.folder, required this.onBrowse});
 
-  final String? outputPath;
+  final FolderRef? folder;
   final VoidCallback? onBrowse;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final outputLabel = folder == null
+        ? 'Same as input folder'
+        : folder is LocalFolder
+            ? (folder as LocalFolder).path
+            : FilePickService.folderDisplayName(folder!);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -406,10 +417,10 @@ class _OutputRow extends StatelessWidget {
                   hintText: 'Same as input folder',
                 ),
                 child: Text(
-                  outputPath ?? 'Same as input folder',
+                  outputLabel,
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color:
-                        outputPath == null ? cs.onSurfaceVariant : cs.onSurface,
+                        folder == null ? cs.onSurfaceVariant : cs.onSurface,
                   ),
                   overflow: TextOverflow.ellipsis,
                 ),
@@ -447,8 +458,17 @@ class _StatusCard extends StatelessWidget {
 
       case SortPhase.done:
         final result = state.result!;
-        final basename =
-            result.outputPath.split(RegExp(r'[/\\]')).last;
+        final dest = state.outputFolder ?? state.inputFolder;
+        final String destLabel;
+        if (dest is SafTree) {
+          destLabel = FilePickService.folderDisplayName(dest);
+        } else if (result.outputPath.isNotEmpty) {
+          destLabel = result.outputPath.split(RegExp(r'[/\\]')).last;
+        } else if (dest != null) {
+          destLabel = FilePickService.folderDisplayName(dest);
+        } else {
+          destLabel = 'Selected folder';
+        }
         final verb = result.moved ? 'Moved' : 'Copied';
 
         return Card(
@@ -475,7 +495,7 @@ class _StatusCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '$verb into $basename',
+                  '$verb into $destLabel',
                   style: theme.textTheme.bodyMedium?.copyWith(
                     color: cs.onSurfaceVariant,
                   ),

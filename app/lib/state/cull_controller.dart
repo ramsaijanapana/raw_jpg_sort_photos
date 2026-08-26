@@ -14,8 +14,10 @@ import '../core/raw_preview/raw_preview_extractor.dart';
 import '../core/scanner.dart';
 import '../core/storage/byte_range_reader.dart';
 import '../core/storage/io_storage_gateway.dart';
+import '../core/storage/saf_storage_gateway.dart';
 import '../core/storage/storage_gateway.dart';
 import '../services/prefs_service.dart';
+import '../services/saf/saf_channel.dart';
 
 // ---------------------------------------------------------------------------
 // State
@@ -283,12 +285,18 @@ PhotoPair? _lookupPair(Ref ref, String stem) {
 // ---------------------------------------------------------------------------
 
 class CullController extends Notifier<CullState> {
+  CullController({SafChannel? safChannel}) : _saf = safChannel ?? SafChannel();
+
   Timer? _advanceTimer;
   int _openGeneration = 0;
-  final StorageGateway _gateway = IoStorageGateway();
+  StorageGateway _gateway = IoStorageGateway();
+  final SafChannel _saf;
 
   /// Gateway owned by this cull/review flow.
   StorageGateway get storageGateway => _gateway;
+
+  StorageGateway _gatewayFor(FolderRef folder) =>
+      folder is SafTree ? SafStorageGateway(_saf) : IoStorageGateway();
 
   /// Undo stack: each entry records the stem, previous flag, and index at the
   /// time of the change. Capped at 50 entries.
@@ -300,15 +308,17 @@ class CullController extends Notifier<CullState> {
     return const CullState();
   }
 
-  Future<void> openFolder(String path) async {
+  Future<void> openFolder(String path) => openRef(LocalFolder(path));
+
+  Future<void> openRef(FolderRef folder) async {
     _advanceTimer?.cancel();
     final gen = ++_openGeneration;
 
     _undoStack.clear();
+    _gateway = _gatewayFor(folder);
     state = state.copyWith(loading: true, error: null);
 
     try {
-      final folder = LocalFolder(path);
       final pairs = await scanPairs(folder, gateway: _gateway);
       if (gen != _openGeneration) return;
       pairs.sort((a, b) => a.stem.compareTo(b.stem));
@@ -324,9 +334,10 @@ class CullController extends Notifier<CullState> {
         error: null,
       );
 
-      // Persist the folder path for 'Resume' feature.
       try {
-        await ref.read(prefsServiceProvider).setLastCullDir(path);
+        await ref.read(prefsServiceProvider).setLastCullDir(
+              _persistCullFolder(folder),
+            );
       } catch (_) {
         // Prefs failure is non-fatal.
       }
@@ -401,15 +412,31 @@ class CullController extends Notifier<CullState> {
   Future<ExportResult> export({
     required String destinationPath,
     required bool includeJpgs,
+  }) {
+    return exportTo(
+      LocalFolder(destinationPath),
+      includeJpgs: includeJpgs,
+    );
+  }
+
+  Future<ExportResult> exportTo(
+    FolderRef destination, {
+    required bool includeJpgs,
   }) async {
     final dir = state.dir;
     if (dir == null) throw StateError('No folder open');
+    if (!_sameFolderKind(dir, destination)) {
+      throw const StorageException(
+        StorageException.invalidArg,
+        'export destination kind does not match the open folder',
+      );
+    }
 
     final session = _buildSession();
     return exportKept(
       source: dir,
-      destination: LocalFolder(destinationPath),
-      gateway: _gateway,
+      destination: destination,
+      gateway: _gatewayFor(destination),
       pairs: state.pairs,
       session: session,
       includeJpgs: includeJpgs,
@@ -444,6 +471,16 @@ class CullController extends Notifier<CullState> {
     final dir = state.dir;
     if (dir == null) return;
     final session = _buildSession();
+    if (dir is SafTree) {
+      try {
+        await session.save(dir, gateway: _gateway, ignoreErrors: false);
+      } on StorageException catch (e) {
+        state = state.copyWith(
+          error: 'Could not save cull session: ${e.code}',
+        );
+      }
+      return;
+    }
     await session.save(dir, gateway: _gateway);
   }
 
@@ -485,6 +522,14 @@ class CullController extends Notifier<CullState> {
     }
   }
 }
+
+String _persistCullFolder(FolderRef folder) {
+  if (folder is LocalFolder) return folder.path;
+  return (folder as SafTree).treeUri;
+}
+
+bool _sameFolderKind(FolderRef a, FolderRef b) =>
+    (a is LocalFolder && b is LocalFolder) || (a is SafTree && b is SafTree);
 
 final cullControllerProvider =
     NotifierProvider<CullController, CullState>(CullController.new);

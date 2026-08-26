@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'local_path_classifier.dart';
+
 const _kLastCullDir = 'lastCullDir';
 const _kLastSortInput = 'lastSortInput';
 const _kShowExif = 'showExif';
@@ -22,23 +24,26 @@ class PrefsService {
   Future<void> setLastSortInput(String path) =>
       _prefs.setString(_kLastSortInput, path);
 
+  Future<void> clearLastCullDir() => _prefs.remove(_kLastCullDir);
+
+  Future<void> clearLastSortInput() => _prefs.remove(_kLastSortInput);
+
   bool get showExif => _prefs.getBool(_kShowExif) ?? true;
 
   Future<void> setShowExif(bool value) =>
       _prefs.setBool(_kShowExif, value);
 
-  /// Returns lastCullDir only if the directory actually exists on disk.
-  String? get lastCullDirIfExists {
-    final p = lastCullDir;
-    if (p == null) return null;
-    return Directory(p).existsSync() ? p : null;
-  }
+  /// Local filesystem lastCullDir only. `content://` is never Directory-opened.
+  String? get lastCullDirIfExists => _localIfExists(lastCullDir);
 
-  /// Returns lastSortInput only if the directory actually exists on disk.
-  String? get lastSortInputIfExists {
-    final p = lastSortInput;
-    if (p == null) return null;
-    return Directory(p).existsSync() ? p : null;
+  /// Local filesystem lastSortInput only. `content://` is never Directory-opened.
+  String? get lastSortInputIfExists => _localIfExists(lastSortInput);
+
+  String? _localIfExists(String? stored) {
+    if (stored == null) return null;
+    final local = classifyLocalDirectoryPath(stored);
+    if (local == null) return null;
+    return Directory(local).existsSync() ? local : null;
   }
 }
 

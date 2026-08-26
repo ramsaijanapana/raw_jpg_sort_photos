@@ -63,10 +63,12 @@ class CullSession {
   /// Saves the session to [folder]/cull_session.json.
   ///
   /// Only keep/skip flags are written; undecided entries are omitted.
-  /// Failures are silently ignored. Does not create a missing folder.
+  /// Failures are silently ignored when [ignoreErrors] is true (the default).
+  /// Does not create a missing folder.
   Future<void> save(
     FolderRef folder, {
     required StorageGateway gateway,
+    bool ignoreErrors = true,
   }) async {
     try {
       final data = <String, String>{};
@@ -87,8 +89,9 @@ class CullSession {
         );
       }
       await gateway.writeBytes(file, utf8.encode(jsonEncode(data)));
-    } catch (_) {
-      // Ignore write errors silently
+    } catch (e) {
+      if (ignoreErrors) return;
+      rethrow;
     }
   }
 

@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
+import '../../core/folder_ref.dart';
 import '../../core/models.dart';
 import '../../services/file_pick_service.dart';
 import '../../services/prefs_service.dart';
@@ -157,6 +158,17 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
     // Keep the filmstrip aligned with the current index regardless of what
     // triggered the change (keyboard, swipe, tap, or auto-advance).
     // Also reset the stage transform on index change.
+    ref.listen<String?>(
+      cullControllerProvider.select((s) => s.error),
+      (prev, next) {
+        if (next == null || next == prev) return;
+        if (!context.mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(next)),
+        );
+      },
+    );
+
     ref.listen(
       cullControllerProvider.select((s) => s.index),
       (prev, next) {
@@ -203,8 +215,8 @@ class _ReviewBodyState extends ConsumerState<_ReviewBody> {
         );
         return;
       }
-      if (result.path != null) {
-        await ctrl.openFolder(result.path!);
+      if (result.folder != null) {
+        await ctrl.openRef(result.folder!);
       }
     }
 
@@ -1049,14 +1061,45 @@ class _StageContentState extends ConsumerState<_StageContent> {
       } catch (_) {
         prefs = null;
       }
-      final savedPath = prefs?.lastCullDirIfExists;
+      final savedLocal = prefs?.lastCullDirIfExists;
+      final rawSaved = prefs?.lastCullDir;
+      final hasSafResume = savedLocal == null &&
+          FilePickService.looksLikeContentTreeUri(rawSaved);
 
-      if (savedPath != null) {
+      if (savedLocal != null) {
         return Center(
           child: _ResumePrompt(
-            savedPath: savedPath,
+            label: p.basename(savedLocal),
             onResume: () =>
-                ref.read(cullControllerProvider.notifier).openFolder(savedPath),
+                ref.read(cullControllerProvider.notifier).openFolder(savedLocal),
+            onOpenFolder: widget.onOpenFolder,
+          ),
+        );
+      }
+      if (hasSafResume) {
+        return Center(
+          child: _ResumePrompt(
+            label: 'folder',
+            onResume: () {
+              () async {
+                final svc = ref.read(filePickServiceProvider);
+                final restored = await svc.restorePersistedFolder(
+                  rawSaved,
+                  clearStale: prefs!.clearLastCullDir,
+                );
+                if (!mounted) return;
+                if (restored == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text(directoryAccessWarning)),
+                  );
+                  setState(() {});
+                  return;
+                }
+                await ref
+                    .read(cullControllerProvider.notifier)
+                    .openRef(restored);
+              }();
+            },
             onOpenFolder: widget.onOpenFolder,
           ),
         );
@@ -1486,19 +1529,21 @@ class _BottomBarState extends ConsumerState<_BottomBar> {
       return;
     }
 
-    if (result.path == null) return;
+    if (result.folder == null) return;
 
     try {
-      final exportResult = await widget.ctrl.export(
-        destinationPath: result.path!,
+      final exportResult = await widget.ctrl.exportTo(
+        result.folder!,
         includeJpgs: _includeJpgs,
       );
 
       if (!context.mounted) return;
-      final basename = p.basename(exportResult.outputPath);
+      final destName = result.folder is SafTree
+          ? FilePickService.folderDisplayName(result.folder!)
+          : p.basename(exportResult.outputPath);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Copied ${exportResult.copied} files → $basename'),
+          content: Text('Copied ${exportResult.copied} files → $destName'),
         ),
       );
     } catch (e) {
@@ -1549,25 +1594,24 @@ class _FlagChip extends StatelessWidget {
 /// exists on disk. Displayed inline via the stage empty content.
 class _ResumePrompt extends ConsumerWidget {
   const _ResumePrompt({
-    required this.savedPath,
+    required this.label,
     required this.onResume,
     required this.onOpenFolder,
   });
 
-  final String savedPath;
+  final String label;
   final VoidCallback onResume;
   final VoidCallback onOpenFolder;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final baseName = p.basename(savedPath);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         FilledButton.icon(
           onPressed: onResume,
           icon: const Icon(Icons.history),
-          label: Text('Resume $baseName'),
+          label: Text('Resume $label'),
         ),
         const SizedBox(height: 12),
         OutlinedButton(

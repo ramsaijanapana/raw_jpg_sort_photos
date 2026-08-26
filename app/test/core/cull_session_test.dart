@@ -128,6 +128,25 @@ void main() {
       );
       expect(nonExist.existsSync(), isFalse);
     });
+
+    test('save ignoreErrors false rethrows', () async {
+      final nonExist = Directory(p.join(tmp.path, 'non_existent_dir'));
+      final session = CullSession({'A': CullFlag.keep});
+
+      await expectLater(
+        session.save(
+          LocalFolder(nonExist.path),
+          gateway: gateway,
+          ignoreErrors: false,
+        ),
+        throwsA(isA<Object>()),
+      );
+      await expectLater(
+        session.save(LocalFolder(nonExist.path), gateway: gateway),
+        completes,
+      );
+      expect(nonExist.existsSync(), isFalse);
+    });
   });
 
   group('Round-trip', () {
