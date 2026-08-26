@@ -142,13 +142,17 @@ class PhotoSorterSafPlugin :
       @Suppress("DEPRECATION")
       host.startActivityForResult(intent, REQ_PICK_TREE)
     } catch (e: ActivityNotFoundException) {
-      pendingPick = null
+      if (pendingPick === result) {
+        pendingPick = null
+      }
       postError(
         result,
         SafCodedException("unsupported", e.message ?: "no document picker", SafErrors.details("pickTree")),
       )
     } catch (t: Throwable) {
-      pendingPick = null
+      if (pendingPick === result) {
+        pendingPick = null
+      }
       postError(result, SafErrors.mapThrowable(t, "pickTree"))
     }
   }

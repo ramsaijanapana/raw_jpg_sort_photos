@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
@@ -291,10 +292,20 @@ class SafOperations(
       source.displayName != destName &&
       source.flags and DocumentsContract.Document.FLAG_SUPPORTS_RENAME != 0
     ) {
-      val renamed = DocumentsContract.renameDocument(resolver, srcUri, destName)
+      val renamed = try {
+        DocumentsContract.renameDocument(resolver, srcUri, destName)
+      } catch (e: SecurityException) {
+        throw e
+      } catch (_: FileNotFoundException) {
+        throwIfVerifiedInputGone(tree, documentId, treeUri, op)
+        null
+      }
       if (renamed != null) {
         val renamedId = DocumentsContract.getDocumentId(renamed)
-        val meta = queryDocument(tree, renamedId) ?: source.copy(displayName = destName, documentId = renamedId)
+        val meta = queryDocument(tree, renamedId)
+        if (meta == null || meta.displayName != destName) {
+          throw coded("incomplete_move", "move did not produce the destination name", op, treeUri, renamedId, destName)
+        }
         return SafCodec.moveResult("renamed", meta.toEntry())
       }
     }
@@ -304,27 +315,47 @@ class SafOperations(
       Build.VERSION.SDK_INT >= 24 &&
       source.flags and DocumentsContract.Document.FLAG_SUPPORTS_MOVE != 0
     ) {
-      try {
-        val moved = DocumentsContract.moveDocument(
+      val moved = try {
+        DocumentsContract.moveDocument(
           resolver,
           srcUri,
           documentUri(tree, resolvedParent),
           documentUri(tree, destParentId),
         )
-        if (moved != null) {
-          var movedId = DocumentsContract.getDocumentId(moved)
-          var meta = queryDocument(tree, movedId)
-          if (meta != null && meta.displayName != destName) {
-            val renamed = DocumentsContract.renameDocument(resolver, documentUri(tree, movedId), destName)
-            if (renamed != null) {
-              movedId = DocumentsContract.getDocumentId(renamed)
-              meta = queryDocument(tree, movedId) ?: meta.copy(displayName = destName, documentId = movedId)
-            }
-          }
-          return SafCodec.moveResult("renamed", (meta ?: source.copy(documentId = movedId)).toEntry())
-        }
+      } catch (e: SecurityException) {
+        throw e
       } catch (_: UnsupportedOperationException) {
-        // Fall through to copy+verify+delete.
+        null
+      } catch (_: FileNotFoundException) {
+        throwIfVerifiedInputGone(tree, documentId, treeUri, op)
+        throwIfVerifiedInputGone(tree, destParentId, treeUri, op)
+        null
+      }
+      if (moved != null) {
+        val leftover = findChildByName(tree, resolvedParent, source.displayName)
+        if (leftover != null && leftover.documentId == documentId) {
+          throw coded("incomplete_move", "same-tree move left the source in place", op, treeUri, documentId)
+        }
+        var movedId = DocumentsContract.getDocumentId(moved)
+        var meta = queryDocument(tree, movedId)
+        if (meta != null && meta.displayName != destName) {
+          val renamed = try {
+            DocumentsContract.renameDocument(resolver, documentUri(tree, movedId), destName)
+          } catch (e: SecurityException) {
+            throw e
+          } catch (_: Exception) {
+            null
+          }
+          if (renamed == null) {
+            throw coded("incomplete_move", "move did not produce the destination name", op, treeUri, movedId, destName)
+          }
+          movedId = DocumentsContract.getDocumentId(renamed)
+          meta = queryDocument(tree, movedId)
+        }
+        if (meta == null || meta.displayName != destName) {
+          throw coded("incomplete_move", "move did not produce the destination name", op, treeUri, movedId, destName)
+        }
+        return SafCodec.moveResult("renamed", meta.toEntry())
       }
     }
     val copied = copyInternal(
@@ -478,12 +509,19 @@ class SafOperations(
     if (findChildByName(tree, parentDocumentId, displayName) != null) {
       throw coded("already_exists", "already exists", op, treeUri, parentDocumentId, displayName)
     }
-    val created = DocumentsContract.createDocument(
-      resolver,
-      documentUri(tree, parentDocumentId),
-      mimeType,
-      displayName,
-    ) ?: throw coded("io_failure", "$op failed", op, treeUri, parentDocumentId, displayName)
+    val created = try {
+      DocumentsContract.createDocument(
+        resolver,
+        documentUri(tree, parentDocumentId),
+        mimeType,
+        displayName,
+      )
+    } catch (e: SecurityException) {
+      throw e
+    } catch (_: FileNotFoundException) {
+      throwIfVerifiedInputGone(tree, parentDocumentId, treeUri, op)
+      throw coded("io_failure", "$op failed", op, treeUri, parentDocumentId, displayName)
+    } ?: throw coded("io_failure", "$op failed", op, treeUri, parentDocumentId, displayName)
     val createdId = DocumentsContract.getDocumentId(created)
     val meta = queryDocument(tree, createdId)
     if (meta == null) {
@@ -523,11 +561,34 @@ class SafOperations(
     }
     val sourceSize = documentByteLength(srcTree, srcDocumentId, srcTreeUri, op)
     val srcUri = documentUri(srcTree, srcDocumentId)
-    if (existing == null && tryCopyDocumentApi(srcTree, destTree, srcUri, destParentId, destName)) {
-      val copied = findChildByName(destTree, destParentId, destName)
-        ?: throw coded("io_failure", "copy failed", op, destTreeUri, destParentId, destName)
-      val verified = verifyCopied(destTree, copied.documentId, sourceSize, destTreeUri, op, destName, createdHere = true)
-      return verified.toEntry() to sourceSize
+    if (existing == null) {
+      val apiDestId = tryCopyDocumentApi(
+        srcTree = srcTree,
+        srcTreeUri = srcTreeUri,
+        srcDocumentId = srcDocumentId,
+        destTree = destTree,
+        destTreeUri = destTreeUri,
+        srcUri = srcUri,
+        destParentId = destParentId,
+        destName = destName,
+        op = op,
+      )
+      if (apiDestId != null) {
+        if (opId != null && isCancelled(opId)) {
+          deleteDocumentBestEffort(destTree, apiDestId)
+          throw coded("cancelled", "cancelled", op, srcTreeUri, srcDocumentId)
+        }
+        val verified = verifyCopied(
+          destTree,
+          apiDestId,
+          sourceSize,
+          destTreeUri,
+          op,
+          destName,
+          createdHere = true,
+        )
+        return verified.toEntry() to sourceSize
+      }
     }
     val destId: String
     val createdHere: Boolean
@@ -535,12 +596,19 @@ class SafOperations(
       destId = existing.documentId
       createdHere = false
     } else {
-      val created = DocumentsContract.createDocument(
-        resolver,
-        documentUri(destTree, destParentId),
-        source.mimeType.ifEmpty { "application/octet-stream" },
-        destName,
-      ) ?: throw coded("io_failure", "copy failed", op, destTreeUri, destParentId, destName)
+      val created = try {
+        DocumentsContract.createDocument(
+          resolver,
+          documentUri(destTree, destParentId),
+          source.mimeType.ifEmpty { "application/octet-stream" },
+          destName,
+        )
+      } catch (e: SecurityException) {
+        throw e
+      } catch (_: FileNotFoundException) {
+        throwIfVerifiedInputGone(destTree, destParentId, destTreeUri, op)
+        throw coded("io_failure", "copy failed", op, destTreeUri, destParentId, destName)
+      } ?: throw coded("io_failure", "copy failed", op, destTreeUri, destParentId, destName)
       destId = DocumentsContract.getDocumentId(created)
       val createdMeta = queryDocument(destTree, destId)
       if (createdMeta == null || createdMeta.displayName != destName) {
@@ -573,35 +641,80 @@ class SafOperations(
 
   private fun tryCopyDocumentApi(
     srcTree: Uri,
+    srcTreeUri: String,
+    srcDocumentId: String,
     destTree: Uri,
+    destTreeUri: String,
     srcUri: Uri,
     destParentId: String,
     destName: String,
-  ): Boolean {
-    if (Build.VERSION.SDK_INT < 24) return false
-    val srcAuth = srcTree.authority ?: return false
-    val destAuth = destTree.authority ?: return false
-    if (!srcAuth.equals(destAuth, ignoreCase = true)) return false
-    return try {
-      val copied = DocumentsContract.copyDocument(resolver, srcUri, documentUri(destTree, destParentId))
-        ?: return false
-      var destId = DocumentsContract.getDocumentId(copied)
-      val meta = queryDocument(destTree, destId)
-      if (meta != null && meta.displayName != destName) {
-        val renamed = DocumentsContract.renameDocument(resolver, documentUri(destTree, destId), destName)
-        if (renamed == null) {
-          DocumentsContract.deleteDocument(resolver, documentUri(destTree, destId))
-          return false
-        }
-        destId = DocumentsContract.getDocumentId(renamed)
-      }
-      queryDocument(destTree, destId) != null
+    op: String,
+  ): String? {
+    if (Build.VERSION.SDK_INT < 24) return null
+    val srcAuth = srcTree.authority ?: return null
+    val destAuth = destTree.authority ?: return null
+    if (!srcAuth.equals(destAuth, ignoreCase = true)) return null
+    val copied = try {
+      DocumentsContract.copyDocument(resolver, srcUri, documentUri(destTree, destParentId))
     } catch (e: SecurityException) {
       throw e
-    } catch (e: java.io.FileNotFoundException) {
+    } catch (_: FileNotFoundException) {
+      throwIfVerifiedInputGone(srcTree, srcDocumentId, srcTreeUri, op)
+      throwIfVerifiedInputGone(destTree, destParentId, destTreeUri, op)
+      return null
+    } catch (_: Exception) {
+      return null
+    } ?: return null
+    val createdId = DocumentsContract.getDocumentId(copied)
+    return finalizeApiCopyDestination(destTree, createdId, destName)
+  }
+
+  private fun finalizeApiCopyDestination(
+    destTree: Uri,
+    createdId: String,
+    destName: String,
+  ): String? {
+    var destId = createdId
+    try {
+      var meta = queryDocument(destTree, destId)
+      if (meta == null) {
+        deleteDocumentBestEffort(destTree, destId)
+        return null
+      }
+      if (meta.displayName != destName) {
+        val renamed = try {
+          DocumentsContract.renameDocument(resolver, documentUri(destTree, destId), destName)
+        } catch (e: SecurityException) {
+          throw e
+        } catch (_: Exception) {
+          deleteDocumentBestEffort(destTree, destId)
+          return null
+        }
+        if (renamed == null) {
+          deleteDocumentBestEffort(destTree, destId)
+          return null
+        }
+        destId = DocumentsContract.getDocumentId(renamed)
+        meta = queryDocument(destTree, destId)
+      }
+      if (meta == null || meta.displayName != destName) {
+        deleteDocumentBestEffort(destTree, destId)
+        if (destId != createdId) {
+          deleteDocumentBestEffort(destTree, createdId)
+        }
+        return null
+      }
+      return destId
+    } catch (e: SecurityException) {
+      throw e
+    } catch (e: SafCodedException) {
       throw e
     } catch (_: Exception) {
-      false
+      deleteDocumentBestEffort(destTree, destId)
+      if (destId != createdId) {
+        deleteDocumentBestEffort(destTree, createdId)
+      }
+      return null
     }
   }
 
@@ -1041,6 +1154,25 @@ class SafOperations(
       file.delete()
     } catch (_: Exception) {
       // Best-effort cleanup.
+    }
+  }
+
+  private fun deleteDocumentBestEffort(tree: Uri, documentId: String) {
+    try {
+      DocumentsContract.deleteDocument(resolver, documentUri(tree, documentId))
+    } catch (_: Exception) {
+      // Best-effort cleanup of a provider-created destination.
+    }
+  }
+
+  private fun throwIfVerifiedInputGone(
+    tree: Uri,
+    documentId: String,
+    treeUri: String,
+    op: String,
+  ) {
+    if (queryDocument(tree, documentId) == null) {
+      throw coded("not_found", "$op failed", op, treeUri, documentId)
     }
   }
 
