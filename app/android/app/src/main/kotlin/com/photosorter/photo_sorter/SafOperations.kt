@@ -38,6 +38,11 @@ class SafOperations(
       )
   }
 
+  private data class ApiCopyDestination(
+    val createdId: String,
+    val destId: String,
+  )
+
   fun takePersistable(args: Map<String, Any?>): Map<String, Any?> {
     val (treeUri, tree) = requireTree(args, "takePersistable")
     persistGrant(tree, treeUri, "takePersistable")
@@ -562,7 +567,7 @@ class SafOperations(
     val sourceSize = documentByteLength(srcTree, srcDocumentId, srcTreeUri, op)
     val srcUri = documentUri(srcTree, srcDocumentId)
     if (existing == null) {
-      val apiDestId = tryCopyDocumentApi(
+      val apiDest = tryCopyDocumentApi(
         srcTree = srcTree,
         srcTreeUri = srcTreeUri,
         srcDocumentId = srcDocumentId,
@@ -573,14 +578,21 @@ class SafOperations(
         destName = destName,
         op = op,
       )
-      if (apiDestId != null) {
+      if (apiDest != null) {
         if (opId != null && isCancelled(opId)) {
-          deleteDocumentBestEffort(destTree, apiDestId)
+          confirmRemoveApiCopyDestination(
+            destTree = destTree,
+            destTreeUri = destTreeUri,
+            createdId = apiDest.createdId,
+            destId = apiDest.destId,
+            destName = destName,
+            op = op,
+          )
           throw coded("cancelled", "cancelled", op, srcTreeUri, srcDocumentId)
         }
         val verified = verifyCopied(
           destTree,
-          apiDestId,
+          apiDest.destId,
           sourceSize,
           destTreeUri,
           op,
@@ -649,7 +661,7 @@ class SafOperations(
     destParentId: String,
     destName: String,
     op: String,
-  ): String? {
+  ): ApiCopyDestination? {
     if (Build.VERSION.SDK_INT < 24) return null
     val srcAuth = srcTree.authority ?: return null
     val destAuth = destTree.authority ?: return null
@@ -666,19 +678,28 @@ class SafOperations(
       return null
     } ?: return null
     val createdId = DocumentsContract.getDocumentId(copied)
-    return finalizeApiCopyDestination(destTree, createdId, destName)
+    val destId = finalizeApiCopyDestination(
+      destTree = destTree,
+      destTreeUri = destTreeUri,
+      createdId = createdId,
+      destName = destName,
+      op = op,
+    ) ?: return null
+    return ApiCopyDestination(createdId = createdId, destId = destId)
   }
 
   private fun finalizeApiCopyDestination(
     destTree: Uri,
+    destTreeUri: String,
     createdId: String,
     destName: String,
+    op: String,
   ): String? {
     var destId = createdId
     try {
       var meta = queryDocument(destTree, destId)
       if (meta == null) {
-        deleteDocumentBestEffort(destTree, destId)
+        confirmRemoveApiCopyDestination(destTree, destTreeUri, createdId, destId, destName, op)
         return null
       }
       if (meta.displayName != destName) {
@@ -687,21 +708,18 @@ class SafOperations(
         } catch (e: SecurityException) {
           throw e
         } catch (_: Exception) {
-          deleteDocumentBestEffort(destTree, destId)
+          confirmRemoveApiCopyDestination(destTree, destTreeUri, createdId, destId, destName, op)
           return null
         }
         if (renamed == null) {
-          deleteDocumentBestEffort(destTree, destId)
+          confirmRemoveApiCopyDestination(destTree, destTreeUri, createdId, destId, destName, op)
           return null
         }
         destId = DocumentsContract.getDocumentId(renamed)
         meta = queryDocument(destTree, destId)
       }
       if (meta == null || meta.displayName != destName) {
-        deleteDocumentBestEffort(destTree, destId)
-        if (destId != createdId) {
-          deleteDocumentBestEffort(destTree, createdId)
-        }
+        confirmRemoveApiCopyDestination(destTree, destTreeUri, createdId, destId, destName, op)
         return null
       }
       return destId
@@ -710,11 +728,74 @@ class SafOperations(
     } catch (e: SafCodedException) {
       throw e
     } catch (_: Exception) {
-      deleteDocumentBestEffort(destTree, destId)
-      if (destId != createdId) {
-        deleteDocumentBestEffort(destTree, createdId)
-      }
+      confirmRemoveApiCopyDestination(destTree, destTreeUri, createdId, destId, destName, op)
       return null
+    }
+  }
+
+  private fun confirmRemoveApiCopyDestination(
+    destTree: Uri,
+    destTreeUri: String,
+    createdId: String,
+    destId: String,
+    destName: String,
+    op: String,
+  ) {
+    confirmRemoveApiCopyId(destTree, destTreeUri, destId, destName, op)
+    if (createdId != destId) {
+      confirmRemoveApiCopyId(destTree, destTreeUri, createdId, destName, op)
+    }
+  }
+
+  private fun confirmRemoveApiCopyId(
+    destTree: Uri,
+    destTreeUri: String,
+    documentId: String,
+    destName: String,
+    op: String,
+  ) {
+    try {
+      val deleted = DocumentsContract.deleteDocument(resolver, documentUri(destTree, documentId))
+      if (!deleted) {
+        throw coded(
+          "io_failure",
+          "could not remove API copy destination",
+          op,
+          destTreeUri,
+          documentId,
+          destName,
+        )
+      }
+    } catch (e: SecurityException) {
+      throw e
+    } catch (e: SafCodedException) {
+      throw e
+    } catch (_: Exception) {
+      // Delete threw. A later definitive absent query may count as removed.
+    }
+    val remaining = try {
+      queryDocument(destTree, documentId)
+    } catch (e: SecurityException) {
+      throw e
+    } catch (_: Exception) {
+      throw coded(
+        "io_failure",
+        "could not confirm API copy destination removal",
+        op,
+        destTreeUri,
+        documentId,
+        destName,
+      )
+    }
+    if (remaining != null) {
+      throw coded(
+        "io_failure",
+        "could not remove API copy destination",
+        op,
+        destTreeUri,
+        documentId,
+        destName,
+      )
     }
   }
 
@@ -1154,14 +1235,6 @@ class SafOperations(
       file.delete()
     } catch (_: Exception) {
       // Best-effort cleanup.
-    }
-  }
-
-  private fun deleteDocumentBestEffort(tree: Uri, documentId: String) {
-    try {
-      DocumentsContract.deleteDocument(resolver, documentUri(tree, documentId))
-    } catch (_: Exception) {
-      // Best-effort cleanup of a provider-created destination.
     }
   }
 
