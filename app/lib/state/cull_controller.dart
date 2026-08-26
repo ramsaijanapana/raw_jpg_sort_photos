@@ -315,16 +315,17 @@ class CullController extends Notifier<CullState> {
     final gen = ++_openGeneration;
 
     _undoStack.clear();
-    _gateway = _gatewayFor(folder);
     state = state.copyWith(loading: true, error: null);
 
+    final candidate = _gatewayFor(folder);
     try {
-      final pairs = await scanPairs(folder, gateway: _gateway);
+      final pairs = await scanPairs(folder, gateway: candidate);
       if (gen != _openGeneration) return;
       pairs.sort((a, b) => a.stem.compareTo(b.stem));
-      final session = await CullSession.load(folder, gateway: _gateway);
+      final session = await CullSession.load(folder, gateway: candidate);
       if (gen != _openGeneration) return;
 
+      _gateway = candidate;
       state = state.copyWith(
         dir: folder,
         pairs: pairs,
@@ -345,6 +346,7 @@ class CullController extends Notifier<CullState> {
       _preloadNeighbors(0);
     } catch (e) {
       if (gen != _openGeneration) return;
+      _restoreGatewayForOpenDir();
       state = state.copyWith(
         loading: false,
         error: 'Failed to open folder: $e',
@@ -472,6 +474,9 @@ class CullController extends Notifier<CullState> {
     if (dir == null) return;
     final session = _buildSession();
     if (dir is SafTree) {
+      // Clear first so an identical subsequent failure is observable to
+      // listeners that ignore unchanged CullState.error strings.
+      state = state.copyWith(error: null);
       try {
         await session.save(dir, gateway: _gateway, ignoreErrors: false);
       } on StorageException catch (e) {
@@ -482,6 +487,25 @@ class CullController extends Notifier<CullState> {
       return;
     }
     await session.save(dir, gateway: _gateway);
+  }
+
+  void _restoreGatewayForOpenDir() {
+    final dir = state.dir;
+    if (dir == null) {
+      if (_gateway is! IoStorageGateway) {
+        _gateway = IoStorageGateway();
+      }
+      return;
+    }
+    if (dir is SafTree) {
+      if (_gateway is! SafStorageGateway) {
+        _gateway = SafStorageGateway(_saf);
+      }
+      return;
+    }
+    if (_gateway is! IoStorageGateway) {
+      _gateway = IoStorageGateway();
+    }
   }
 
   CullSession _buildSession() {

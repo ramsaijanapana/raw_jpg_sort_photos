@@ -23,9 +23,9 @@ const _src = SafTree(
 );
 const _dest = SafTree(
   treeUri:
-      'content://com.android.externalstorage.documents/tree/primary%3AExport',
-  documentId: 'primary:Export',
-  displayName: 'Export',
+      'content://com.android.externalstorage.documents/tree/primary%3ACameraRoll',
+  documentId: 'primary:CameraRoll',
+  displayName: 'Camera Roll',
 );
 
 void main() {
@@ -107,16 +107,25 @@ void main() {
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
+      expect(find.text('Export Kept →'), findsOneWidget);
+      expect(find.text('Copied 1 files → Camera Roll'), findsNothing);
+
       await tester.runAsync(() async {
-        await tester.tap(find.textContaining('Export'));
+        await tester.tap(find.text('Export Kept →'));
         await Future<void>.delayed(const Duration(milliseconds: 30));
       });
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 100));
 
       expect(find.byType(SnackBar), findsOneWidget);
-      expect(find.textContaining('Copied'), findsOneWidget);
-      expect(find.textContaining('Export'), findsWidgets);
+      expect(
+        find.descendant(
+          of: find.byType(SnackBar),
+          matching: find.text('Copied 1 files → Camera Roll'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Export Kept →'), findsOneWidget);
       expect(find.textContaining('content://'), findsNothing);
     },
   );

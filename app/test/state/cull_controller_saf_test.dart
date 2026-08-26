@@ -128,6 +128,138 @@ void main() {
     },
   );
 
+  test(
+    'repeated identical SAF save failures remain observable',
+    () async {
+      seedShoot();
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+      await ctrl.openRef(_tree);
+      harness.failWrites = true;
+
+      final visible = <String>[];
+      container.listen<String?>(
+        cullControllerProvider.select((s) => s.error),
+        (prev, next) {
+          if (next != null && next != prev) visible.add(next);
+        },
+      );
+
+      await ctrl.keep();
+      await ctrl.skip();
+      await ctrl.undo();
+
+      final state = container.read(cullControllerProvider);
+      expect(visible, hasLength(3));
+      expect(visible, everyElement(contains('read_only')));
+      expect(state.error, contains('read_only'));
+      expect(state.flags['photo'], CullFlag.keep);
+    },
+  );
+
+  test(
+    'SAF save error resets after success and a later identical failure is observable',
+    () async {
+      seedShoot();
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+      await ctrl.openRef(_tree);
+
+      final visible = <String>[];
+      container.listen<String?>(
+        cullControllerProvider.select((s) => s.error),
+        (prev, next) {
+          if (next != null && next != prev) visible.add(next);
+        },
+      );
+
+      harness.failWrites = true;
+      await ctrl.keep();
+      expect(container.read(cullControllerProvider).error, contains('read_only'));
+      expect(container.read(cullControllerProvider).flags['photo'], CullFlag.keep);
+
+      harness.failWrites = false;
+      await ctrl.skip();
+      expect(container.read(cullControllerProvider).error, isNull);
+      expect(container.read(cullControllerProvider).flags['photo'], CullFlag.skip);
+
+      harness.failWrites = true;
+      await ctrl.keep();
+
+      final state = container.read(cullControllerProvider);
+      expect(visible, hasLength(2));
+      expect(visible, everyElement(contains('read_only')));
+      expect(state.error, contains('read_only'));
+      expect(state.flags['photo'], CullFlag.keep);
+    },
+  );
+
+  test(
+    'failed SAF open after local folder restores Io gateway and does not persist',
+    () async {
+      final tmp = Directory.systemTemp.createTempSync('cull_local_then_saf_');
+      addTearDown(() => tmp.deleteSync(recursive: true));
+      File(p.join(tmp.path, 'IMG_001.ARW')).writeAsBytesSync([0, 1, 2, 3]);
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+      final prefs = container.read(prefsServiceProvider);
+
+      await ctrl.openFolder(tmp.path);
+      expect(ctrl.storageGateway, isA<IoStorageGateway>());
+      expect(prefs.lastCullDir, tmp.path);
+
+      harness.failOpen = true;
+      await ctrl.openRef(_tree);
+
+      final state = container.read(cullControllerProvider);
+      expect(state.dir, isA<LocalFolder>());
+      expect((state.dir as LocalFolder).path, tmp.path);
+      expect(state.pairs, hasLength(1));
+      expect(ctrl.storageGateway, isA<IoStorageGateway>());
+      expect(state.loading, isFalse);
+      expect(state.error, contains('Failed to open folder'));
+      expect(prefs.lastCullDir, tmp.path);
+      expect(prefs.lastCullDir, isNot(_treeUri));
+      expect(harness.calls.any((c) => c.method == 'delete'), isFalse);
+    },
+  );
+
+  test(
+    'failed local open after SAF folder restores SafStorageGateway and does not persist',
+    () async {
+      seedShoot();
+      final container = await makeContainer();
+      addTearDown(container.dispose);
+      final ctrl = container.read(cullControllerProvider.notifier);
+      final prefs = container.read(prefsServiceProvider);
+
+      await ctrl.openRef(_tree);
+      expect(ctrl.storageGateway, isA<SafStorageGateway>());
+      expect(prefs.lastCullDir, _treeUri);
+
+      await ctrl.openFolder(_treeUri);
+
+      final state = container.read(cullControllerProvider);
+      expect(state.dir, isA<SafTree>());
+      expect((state.dir as SafTree).treeUri, _treeUri);
+      expect(state.pairs, hasLength(1));
+      expect(state.pairs.single.raw.documentId, 'primary:DCIM/photo.arw');
+      expect(ctrl.storageGateway, isA<SafStorageGateway>());
+      expect(state.loading, isFalse);
+      expect(state.error, contains('Failed to open folder'));
+      expect(prefs.lastCullDir, _treeUri);
+
+      harness.failWrites = true;
+      await ctrl.keep();
+      expect(container.read(cullControllerProvider).flags['photo'], CullFlag.keep);
+      expect(container.read(cullControllerProvider).error, contains('read_only'));
+      expect(ctrl.storageGateway, isA<SafStorageGateway>());
+    },
+  );
+
   test('desktop session save failure stays silent', () async {
     final tmp = Directory.systemTemp.createTempSync('cull_silent_');
     addTearDown(() {
@@ -232,6 +364,7 @@ class _ScriptedSaf {
   final Map<String, Map<String, _SafNode>> trees = {};
   bool hasPersisted = true;
   bool failWrites = false;
+  bool failOpen = false;
 
   void addTree(SafTree tree) {
     trees[tree.treeUri] = {
@@ -281,6 +414,12 @@ class _ScriptedSaf {
       case 'persistedTrees':
         return <String, Object?>{'trees': <Object>[]};
       case 'listChildren':
+        if (failOpen) {
+          throw PlatformException(
+            code: StorageException.permissionDenied,
+            message: 'grant revoked',
+          );
+        }
         return _list(args);
       case 'childByName':
         return _child(args);
