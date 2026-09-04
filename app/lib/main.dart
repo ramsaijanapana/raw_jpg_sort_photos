@@ -54,6 +54,7 @@ class PhotoSorterApp extends StatelessWidget {
 
     return MaterialApp(
       title: 'Photo Sorter',
+      debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: seed),
