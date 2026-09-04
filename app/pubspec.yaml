@@ -42,4 +42,6 @@ flutter_launcher_icons:
     generate: true
 
 flutter:
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
