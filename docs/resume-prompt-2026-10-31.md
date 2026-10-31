@@ -17,7 +17,7 @@ Resume scoped Photo Sorter engineering from the saved WIP branch only because I 
 Repository: /Users/dev/Documents/GitHub/raw_jpg_sort_photos
 Remote: https://github.com/ramsaijanapana/raw_jpg_sort_photos
 Branch: codex/wip-local-work-2026-10-31
-Baseline: 6963e20
+Historical checkpoint (not a checkout target): 6963e20
 App identity: Photo Sorter: RAW+JPG, app 6808624854, bundle io.devara.photosorter
 Latest known App Store state: read-only owner check on 2026-10-31 08:52 EDT: version 1.0, build 1.0.0 (5), Rejected.
 
